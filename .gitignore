@@ -1,0 +1,10 @@
+**/assets/
+/build/
+*.png
+*.jpg
+*.jpeg
+.vscode/
+.cache/
+*.npz
+*.mp4
+
