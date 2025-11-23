@@ -8,4 +8,4 @@
 .cache/
 *.npz
 *.mp4
-
+.zed/
