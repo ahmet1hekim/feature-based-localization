@@ -1,5 +1,5 @@
 **/assets/*
-!/assets/.gitkeep
+!**/assets/.gitkeep
 /build/
 *.png
 *.jpg
