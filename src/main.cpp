@@ -37,12 +37,14 @@ int main()
 {
 
     boost::asio::io_context io_context;
+    boost::asio::ip::tcp::acceptor acceptor(io_context,
+    boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), 12345));
 
-    boost::asio::ip::tcp::resolver resolver(io_context);
-    boost::asio::ip::tcp::resolver::results_type endpoints = resolver.resolve("127.0.0.1", "12345");
+    std::cout << "Waiting for client on port 12345..." << std::endl;
 
     boost::asio::ip::tcp::socket socket(io_context);
-    boost::asio::connect(socket, endpoints);
+    acceptor.accept(socket);
+
     // drones view res
     u_int16_t drone_cam_res_x = 960;
     u_int16_t drone_cam_res_y = 540;

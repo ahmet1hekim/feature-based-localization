@@ -9,3 +9,4 @@
 *.npz
 *.mp4
 .zed/
+**/__pycache__/
