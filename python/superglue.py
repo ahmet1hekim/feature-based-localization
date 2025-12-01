@@ -1,4 +1,6 @@
+import math
 import os
+from typing import Tuple
 
 import cv2
 import matplotlib.cm as cm
@@ -26,38 +28,70 @@ config = {
 matching = Matching(config).eval().to(device)
 
 
-def preprocess_image(img, center_x, center_y, target_w, target_h):
+def preprocess_image(img, center_x, center_y, target_w, target_h, angle=0):
     h, w = img.shape[:2]
 
+    if angle != 0:
+        # Compute rotation matrix
+        rot_mat = cv2.getRotationMatrix2D((center_x, center_y), -angle, 1.0)
+
+        # Calculate the new bounding dimensions of the rotated image
+        cos = abs(rot_mat[0, 0])
+        sin = abs(rot_mat[0, 1])
+
+        new_w = int(h * sin + w * cos)
+        new_h = int(h * cos + w * sin)
+
+        # Adjust rotation matrix to take into account translation
+        rot_mat[0, 2] += (new_w / 2) - center_x
+        rot_mat[1, 2] += (new_h / 2) - center_y
+
+        # Perform the actual rotation with expanded size
+        rotated = cv2.warpAffine(
+            img,
+            rot_mat,
+            (new_w, new_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+
+        # Update center coordinates for cropping because of expanded image
+        center_x = new_w // 2
+        center_y = new_h // 2
+
+        # Use expanded image dimensions
+        h, w = rotated.shape[:2]
+
+    else:
+        rotated = img
+
+    # Now crop the centered window from the rotated image
     half_w = target_w // 2
     half_h = target_h // 2
 
-    # Calculate crop bounds clamped to image
     x1 = center_x - half_w
     y1 = center_y - half_h
     x2 = center_x + half_w
     y2 = center_y + half_h
 
-    # Compute intersection with image bounds
+    # Clamp crop to rotated image bounds
     ix1 = max(x1, 0)
     iy1 = max(y1, 0)
     ix2 = min(x2, w)
     iy2 = min(y2, h)
 
-    # Initialize black canvas of desired size
+    # Create black canvas
     cropped = np.zeros((target_h, target_w, 3), dtype=img.dtype)
 
-    # Calculate where to place the valid image patch in the canvas
-    start_x = ix1 - x1  # offset if crop window extends left beyond image
-    start_y = iy1 - y1  # offset if crop window extends top beyond image
+    start_x = ix1 - x1
+    start_y = iy1 - y1
 
-    # Width and height of the valid patch
     valid_w = ix2 - ix1
     valid_h = iy2 - iy1
 
     if valid_w > 0 and valid_h > 0:
-        # Copy valid part from image to the black canvas
-        cropped[start_y : start_y + valid_h, start_x : start_x + valid_w] = img[
+        cropped[start_y : start_y + valid_h, start_x : start_x + valid_w] = rotated[
             iy1:iy2, ix1:ix2
         ]
 
@@ -234,19 +268,21 @@ def main():
     cv2.destroyAllWindows()
 
     # Initialize refined pos at coarse search result
-    refined_x, refined_y = first_lock_x, first_lock_y
+    locked_x, locked_y = first_lock_x, first_lock_y
 
     while True:
         frame = recv.get_mat()
+        angle = recv.get_float()  # degrees, 0-360
+
         if frame is None:
             continue
 
         h_frame, w_frame = frame.shape[:2]
 
-        # Crop map around current refined pos
         map_proc_part = preprocess_image(
-            map_img, int(refined_x), int(refined_y), w_frame, h_frame
+            map_img, int(locked_x), int(locked_y), w_frame, h_frame, -angle
         )
+
         frame_proc = preprocess_image(
             frame, int(w_frame / 2), int(h_frame / 2), w_frame, h_frame
         )
@@ -265,29 +301,39 @@ def main():
         kpts1 = pred["keypoints1"]
         conf = pred["matching_scores0"]
 
-        # Filter good matches by confidence and valid indices
-        good_match_idxs = [i for i, m in enumerate(matches) if m >= 0 and conf[i] > 0.5]
+        # filter by conf
+        conf_filtered_ids = [
+            i for i, m in enumerate(matches) if m >= 0 and conf[i] > 0.5
+        ]
 
-        if len(good_match_idxs) > 5:  # only refine if enough matches
-            # Calculate average displacement vector of matches from frame to map crop
-            displacements = []
-            for i in good_match_idxs:
+        # calculate mean difference from features
+        if len(conf_filtered_ids) > 5:
+            pos_diff = []
+            for i in conf_filtered_ids:
                 pt0 = kpts0[i]
                 pt1 = kpts1[matches[i]]
-                disp = pt1 - pt0  # displacement vector (map_kpt - frame_kpt)
-                displacements.append(disp)
+                disp = pt1 - pt0
+                pos_diff.append(disp)
 
-            mean_disp = np.mean(displacements, axis=0)
+            mean_diff = np.mean(pos_diff, axis=0)
 
-            # Update refined position by shifting with mean displacement
-            refined_x += mean_disp[0]
-            refined_y += mean_disp[1]
+            # Compensate translation update by rotating displacement vector back by angle
+            # (Because map crop is rotated, pos_diff are relative to rotated map)
+
+            angle_rad = math.radians(angle)
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            # Rotate diff vector by angle to get it into map coordinates
+            map_x_diff = mean_diff[0] * cos_a - mean_diff[1] * sin_a
+            map_y_diff = mean_diff[0] * sin_a + mean_diff[1] * cos_a
+
+            locked_x += map_x_diff
+            locked_y += map_y_diff
 
         print(
-            f"Refined position: ({refined_x:.2f}, {refined_y:.2f}), Matches: {len(good_match_idxs)}"
+            f"locked position: ({locked_x:.2f}, {locked_y:.2f}), Angle: {angle:.2f}, Matches: {len(conf_filtered_ids)}"
         )
 
-        # Visualization (optional)
         vis = draw_superglue_matches(
             frame_proc,
             map_proc_part,
@@ -299,7 +345,7 @@ def main():
         )
         cv2.imshow("Refined Matches", vis)
 
-        if cv2.waitKey(1) & 0xFF == 27:  # ESC to quit
+        if cv2.waitKey(1) & 0xFF == 27:
             break
 
 

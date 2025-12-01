@@ -218,5 +218,7 @@ int main()
         // cv::imshow("drone_view", sfml2opencv(croppedImage));
         // cv::waitKey(1);
         sendMat(socket, sfml2opencv(croppedImage));
+        float angle = shape.getRotation().asDegrees() ;
+        boost::asio::write(socket, boost::asio::buffer(&angle, sizeof(angle)));
     }
 }

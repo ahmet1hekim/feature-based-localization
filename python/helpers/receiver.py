@@ -43,6 +43,13 @@ class Receiver:
             buf += newbuf
         return buf
 
+    def recv_float(self):
+        float_size = 4  # size of float32 in bytes
+        data = self.recvall(float_size)
+        if data is None:
+            return None
+        return struct.unpack("f", data)[0]
+
     # -------------------------
     # Receive a single OpenCV mat
     # -------------------------
@@ -93,10 +100,14 @@ class Receiver:
             if m is None:
                 print("Server disconnected.")
                 break
+            f = self.recv_float()
+            if f is None:
+                print("Server disconnected while receiving float.")
+                break
 
-            # thread-safe update of latest matrix
             with self.mat_lock:
                 self.mat = m
+                self.latest_float = f  # store float
 
     # -------------------------
     # Thread-safe getter
@@ -106,6 +117,10 @@ class Receiver:
             if self.mat is None:
                 return None
             return self.mat.copy()  # safe
+
+    def get_float(self):
+        with self.mat_lock:
+            return getattr(self, "latest_float", None)
 
 
 # ---------------------------------------------------
