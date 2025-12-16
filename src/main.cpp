@@ -72,7 +72,7 @@ int main()
     // creating the window and setting vsync so my pc doesnt die
     sf::RenderWindow window(sf::VideoMode({window_res_x, window_res_y}), "!", sf::Style::None, sf::State::Windowed);
     window.setVerticalSyncEnabled(true); // call it once after creating the window
-
+    // window.setFramerateLimit(30);
     // setting the sprite's starting point to texture's 0,0 and its size to the window size
     // bg_sprite.setTextureRect(sf::IntRect({0, 0}, {window_res_x, window_res_y}));
 
@@ -107,13 +107,13 @@ int main()
         {
             // std::cout << "move left";
             // tomove_x = -speed_x;
-            shape.rotate(sf::degrees(-2.5f));
+            shape.rotate(sf::degrees(-0.2f));
         }
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Right))
         {
             // std::cout << "move right ";
             // tomove_x = speed_x;
-            shape.rotate(sf::degrees(2.5f));
+            shape.rotate(sf::degrees(0.2f));
         }
         if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down))
         {
