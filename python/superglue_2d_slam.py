@@ -28,6 +28,19 @@ config = {
 matching = Matching(config).eval().to(device)
 
 
+def normalize_deg(a):
+    return (a + 360.0) % 360.0
+
+
+def angle_error_deg(pred, real):
+    """
+    Smallest signed difference between two angles in degrees
+    Result in range [-180, 180]
+    """
+    diff = (pred - real + 180.0) % 360.0 - 180.0
+    return diff
+
+
 def preprocess_image(img, center_x, center_y, target_w, target_h, angle=0):
     h, w = img.shape[:2]
 
@@ -165,42 +178,238 @@ def count_good_matches(matches, conf, conf_thresh=0.2):
     return np.sum(valid_mask)
 
 
+# def main():
+#     print("starting..")
+#     recv = Receiver("127.0.0.1", 12345)
+#     recv.start()
+
+#     # --- Pose ---
+#     locked_x, locked_y = 640.0, 360.0
+#     locked_theta = 0.0  # predicted angle (deg)
+
+#     # --- Error tracking ---
+#     angle_err_sq_sum = 0.0
+#     angle_err_count = 0
+
+#     # --- Previous frame ---
+#     past_frame = None
+
+#     PIXEL_NOISE_THRESH = 0.9  # px
+#     SCALE = 1.0  # world units per pixel
+
+#     while True:
+#         frame = recv.get_mat()
+#         # real_angle = recv.get_float()
+#         if frame is None:
+#             continue
+
+#         h, w = frame.shape[:2]
+#         frame_proc = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+#         # Initialization
+#         if past_frame is None:
+#             past_frame = frame_proc.copy()
+#             continue
+
+#         # SuperGlue matching
+#         with torch.no_grad():
+#             pred = matching(
+#                 {
+#                     "image0": to_superpoint_tensor(past_frame, device),
+#                     "image1": to_superpoint_tensor(frame_proc, device),
+#                 }
+#             )
+#             pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
+
+#         matches = pred["matches0"]
+#         kpts0 = pred["keypoints0"]
+#         kpts1 = pred["keypoints1"]
+#         conf = pred["matching_scores0"]
+
+#         pts0, pts1 = [], []
+#         for i, m in enumerate(matches):
+#             if m >= 0 and conf[i] > 0.5:
+#                 pts0.append(kpts0[i])
+#                 pts1.append(kpts1[m])
+
+#         used_matches = len(pts0)
+
+#         if used_matches >= 8:
+#             pts0 = np.float32(pts0)
+#             pts1 = np.float32(pts1)
+
+#             M, inliers = cv2.estimateAffinePartial2D(
+#                 pts0,
+#                 pts1,
+#                 method=cv2.RANSAC,
+#                 ransacReprojThreshold=3.0,
+#                 maxIters=2000,
+#                 confidence=0.99,
+#             )
+
+#             if M is not None and inliers is not None:
+#                 if int(inliers.sum()) >= 6:
+#                     cx, cy = w * 0.5, h * 0.5
+
+#                     M3 = np.vstack([M, [0, 0, 1]])
+#                     T_neg = np.array([[1, 0, -cx], [0, 1, -cy], [0, 0, 1]])
+#                     T_pos = np.array([[1, 0, cx], [0, 1, cy], [0, 0, 1]])
+#                     M_center = (T_pos @ M3 @ T_neg)[:2, :]
+
+#                     tx_img = M_center[0, 2]
+#                     ty_img = M_center[1, 2]
+
+#                     rot_rad = math.atan2(M_center[1, 0], M_center[0, 0])
+#                     rot_deg = math.degrees(rot_rad)
+
+#                     # --- Update predicted angle ---
+#                     locked_theta += rot_deg
+#                     locked_theta = normalize_deg(locked_theta)
+
+#                     if math.hypot(tx_img, ty_img) > PIXEL_NOISE_THRESH:
+#                         th_rad = math.radians(locked_theta)
+#                         dx = math.cos(th_rad) * tx_img - math.sin(th_rad) * ty_img
+#                         dy = math.sin(th_rad) * tx_img + math.cos(th_rad) * ty_img
+#                         locked_x += dx * SCALE
+#                         locked_y -= dy * SCALE
+
+#         past_frame = frame_proc.copy()
+
+#         # --- Angle comparison ---
+#         pred_angle = normalize_deg(-locked_theta)
+#         # real_angle = real_angle
+
+#         ang_err = angle_error_deg(pred_angle, 0)#real_angle)
+#         angle_err_sq_sum += ang_err**2
+#         angle_err_count += 1
+#         rmse = math.sqrt(angle_err_sq_sum / angle_err_count)
+
+#         print(
+#             f"x={locked_x:.2f}, y={locked_y:.2f}, "
+#             f"pred_th={pred_angle:.2f}°, real_th={real_angle:.2f}°, "
+#             f"err={ang_err:+.2f}°, rmse={rmse:.2f}°, "
+#             f"matches={used_matches}"
+#         )
+
+
+# def main():
+#     print("starting..")
+#     recv = Receiver("127.0.0.1", 12345)
+#     recv.start()
+
+#     locked_theta = 0.0  # predicted angle (deg, OpenCV frame)
+#     past_frame = None
+
+#     while True:
+#         frame = recv.get_mat()
+#         if frame is None:
+#             continue
+
+#         h, w = frame.shape[:2]
+#         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+#         # Init
+#         if past_frame is None:
+#             past_frame = frame_gray.copy()
+#             continue
+
+#         # SuperGlue
+#         with torch.no_grad():
+#             pred = matching(
+#                 {
+#                     "image0": to_superpoint_tensor(past_frame, device),
+#                     "image1": to_superpoint_tensor(frame_gray, device),
+#                 }
+#             )
+#             pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
+
+#         matches = pred["matches0"]
+#         kpts0 = pred["keypoints0"]
+#         kpts1 = pred["keypoints1"]
+#         conf = pred["matching_scores0"]
+
+#         pts0, pts1 = [], []
+#         for i, m in enumerate(matches):
+#             if m >= 0 and conf[i] > 0.5:
+#                 pts0.append(kpts0[i])
+#                 pts1.append(kpts1[m])
+
+#         if len(pts0) >= 8:
+#             pts0 = np.float32(pts0)
+#             pts1 = np.float32(pts1)
+
+#             M, inliers = cv2.estimateAffinePartial2D(
+#                 pts0,
+#                 pts1,
+#                 method=cv2.RANSAC,
+#                 ransacReprojThreshold=3.0,
+#                 maxIters=2000,
+#                 confidence=0.99,
+#             )
+
+#             if M is not None and inliers is not None and int(inliers.sum()) >= 6:
+#                 # Recenter affine transform
+#                 cx, cy = w * 0.5, h * 0.5
+#                 M3 = np.vstack([M, [0, 0, 1]])
+
+#                 T_neg = np.array([[1, 0, -cx], [0, 1, -cy], [0, 0, 1]])
+
+#                 T_pos = np.array([[1, 0, cx], [0, 1, cy], [0, 0, 1]])
+
+#                 M_center = (T_pos @ M3 @ T_neg)[:2, :]
+
+#                 # Rotation extraction
+#                 rot_rad = math.atan2(M_center[1, 0], M_center[0, 0])
+#                 rot_deg = math.degrees(rot_rad)
+
+#                 # Angle update
+#                 locked_theta -= rot_deg
+#                 locked_theta = normalize_deg(locked_theta)
+
+#         # position update logic should go here
+#         #
+
+#         past_frame = frame_gray.copy()
+
+#         print(f"predicted_angle = {locked_theta:.2f}°")
+
+
 def main():
     print("starting..")
     recv = Receiver("127.0.0.1", 12345)
     recv.start()
 
-    # --- Pose ---
-    locked_x, locked_y = 640.0, 360.0
-    locked_theta = 0.0  # degrees
+    locked_theta = 0.0  # predicted angle (deg, OpenCV frame)
+    locked_x = 640.0
+    locked_y = 360.0
 
-    # --- Previous frame ---
-    past_frame = None
-
-    PIXEL_NOISE_THRESH = 0.9  # px
-    SCALE = 1.0  # world units per pixel
+    past_frame_gray = None
+    past_frame_color = None
 
     while True:
         frame = recv.get_mat()
-        angle = recv.get_float()
         if frame is None:
             continue
 
         h, w = frame.shape[:2]
 
-        frame_proc = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_color = frame  # BGR (for preprocess_image)
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Initialization
-        if past_frame is None:
-            past_frame = frame_proc.copy()
+        # Init
+        if past_frame_gray is None:
+            past_frame_gray = frame_gray.copy()
+            past_frame_color = frame_color.copy()
             continue
 
-        # SuperGlue matching
+        # =========================
+        # 1) ROTATION ESTIMATION
+        # =========================
         with torch.no_grad():
             pred = matching(
                 {
-                    "image0": to_superpoint_tensor(past_frame, device),
-                    "image1": to_superpoint_tensor(frame_proc, device),
+                    "image0": to_superpoint_tensor(past_frame_gray, device),
+                    "image1": to_superpoint_tensor(frame_gray, device),
                 }
             )
             pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
@@ -210,17 +419,13 @@ def main():
         kpts1 = pred["keypoints1"]
         conf = pred["matching_scores0"]
 
-        # Collect good matches
         pts0, pts1 = [], []
         for i, m in enumerate(matches):
             if m >= 0 and conf[i] > 0.5:
                 pts0.append(kpts0[i])
                 pts1.append(kpts1[m])
 
-        used_matches = len(pts0)
-
-        # Affine transform estimation if enough matches
-        if used_matches >= 8:
+        if len(pts0) >= 8:
             pts0 = np.float32(pts0)
             pts1 = np.float32(pts1)
 
@@ -233,61 +438,81 @@ def main():
                 confidence=0.99,
             )
 
-            if M is not None and inliers is not None:
-                inlier_count = int(inliers.sum())
+            if M is not None and inliers is not None and int(inliers.sum()) >= 6:
+                cx, cy = w * 0.5, h * 0.5
+                M3 = np.vstack([M, [0, 0, 1]])
 
-                if inlier_count >= 6:
-                    # --- Recenter affine transform to image center ---
-                    cx = w * 0.5
-                    cy = h * 0.5
+                T_neg = np.array([[1, 0, -cx], [0, 1, -cy], [0, 0, 1]])
 
-                    # Convert 2x3 affine to 3x3
-                    M3 = np.vstack([M, [0, 0, 1]])
+                T_pos = np.array([[1, 0, cx], [0, 1, cy], [0, 0, 1]])
 
-                    T_neg = np.array([[1, 0, -cx], [0, 1, -cy], [0, 0, 1]])
+                M_center = (T_pos @ M3 @ T_neg)[:2, :]
 
-                    T_pos = np.array([[1, 0, cx], [0, 1, cy], [0, 0, 1]])
+                rot_rad = math.atan2(M_center[1, 0], M_center[0, 0])
+                rot_deg = math.degrees(rot_rad)
 
-                    M_center = T_pos @ M3 @ T_neg
-                    M_center = M_center[:2, :]
+                # Angle update (your convention)
+                locked_theta -= rot_deg
+                locked_theta = normalize_deg(locked_theta)
 
-                    tx_img = M_center[0, 2]
-                    ty_img = M_center[1, 2]
+        # =========================
+        # 2) TRANSLATION (CORRECT)
+        # =========================
+        cx = w // 2
+        cy = h // 2
 
-                    rot_rad = math.atan2(M_center[1, 0], M_center[0, 0])
-                    rot_deg = math.degrees(rot_rad)
-
-                    mag = math.hypot(tx_img, ty_img)
-
-                    locked_theta_rad = math.radians(locked_theta)
-
-                    print(
-                        f"Translation magnitude: {mag:.3f}, Rotation: {rot_deg:.2f} deg"
-                    )
-
-                    locked_theta += rot_deg
-                    locked_theta = (locked_theta + 360) % 360
-                    locked_theta = 360 - locked_theta
-                    if mag > PIXEL_NOISE_THRESH:
-                        dx_world = (
-                            math.cos(locked_theta_rad) * tx_img
-                            - math.sin(locked_theta_rad) * ty_img
-                        )
-                        dy_world = (
-                            math.sin(locked_theta_rad) * tx_img
-                            + math.cos(locked_theta_rad) * ty_img
-                        )
-
-                        locked_x += dx_world * SCALE
-                        locked_y -= dy_world * SCALE
-
-        past_frame = frame_proc.copy()
-
-        print(
-            f"x={locked_x:.2f}, y={locked_y:.2f}, "
-            f"th={locked_theta:.2f}, matches={used_matches}"
+        # Rotate CURRENT frame into PAST frame orientation
+        curr_aligned = preprocess_image(
+            frame_color,
+            cx,
+            cy,
+            w,
+            h,
+            angle=-rot_deg,  # RELATIVE rotation ONLY
         )
-        print("real_angle:", angle)
+
+        prev_aligned = past_frame_gray  # NO rotation
+
+        with torch.no_grad():
+            pred_t = matching(
+                {
+                    "image0": to_superpoint_tensor(prev_aligned, device),
+                    "image1": to_superpoint_tensor(curr_aligned, device),
+                }
+            )
+            pred_t = {k: v[0].cpu().numpy() for k, v in pred_t.items()}
+
+        matches_t = pred_t["matches0"]
+        kpts0_t = pred_t["keypoints0"]
+        kpts1_t = pred_t["keypoints1"]
+        conf_t = pred_t["matching_scores0"]
+
+        pts0_t, pts1_t = [], []
+        for i, m in enumerate(matches_t):
+            if m >= 0 and conf_t[i] > 0.8:
+                pts0_t.append(kpts0_t[i])
+                pts1_t.append(kpts1_t[m])
+
+        if len(pts0_t) >= 8:
+            pts0_t = np.float32(pts0_t)
+            pts1_t = np.float32(pts1_t)
+
+            v = pts1_t - pts0_t
+            dx_img = np.median(v[:, 0])
+            dy_img = np.median(v[:, 1])
+
+            # accumulate in world frame
+            th = math.radians(locked_theta)
+            dx = math.cos(th) * dx_img - math.sin(th) * dy_img
+            dy = math.sin(th) * dx_img + math.cos(th) * dy_img
+
+            locked_x -= dx
+            locked_y -= dy
+
+        past_frame_gray = frame_gray.copy()
+        past_frame_color = frame_color.copy()
+
+        print(f"θ={locked_theta:.2f}°, x={locked_x:.2f}, y={locked_y:.2f}")
 
 
 if __name__ == "__main__":
