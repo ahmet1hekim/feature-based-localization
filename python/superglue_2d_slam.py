@@ -1,5 +1,8 @@
 import math
 import os
+import socket
+import struct
+import threading
 from typing import Tuple
 
 import cv2
@@ -9,6 +12,40 @@ import torch
 from externals.SuperGluePretrainedNetwork.models.matching import Matching
 from externals.SuperGluePretrainedNetwork.models.utils import make_matching_plot
 from helpers.receiver import Receiver
+
+# ── Pose broadcaster (port 12346 → path_planner.py) ──────────────────────────
+POSE_PORT = 12346
+
+class PoseBroadcaster:
+    """Accept one client and push (x, y, theta) as 3×float32 at each update."""
+    def __init__(self, port: int):
+        self._client: socket.socket | None = None
+        self._lock = threading.Lock()
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind(("0.0.0.0", port))
+        self._server.listen(1)
+        t = threading.Thread(target=self._accept_loop, daemon=True)
+        t.start()
+        print(f"[slam] PoseBroadcaster listening on port {port}")
+
+    def _accept_loop(self):
+        while True:
+            conn, addr = self._server.accept()
+            print(f"[slam] Path planner connected from {addr}")
+            with self._lock:
+                if self._client:
+                    self._client.close()
+                self._client = conn
+
+    def send(self, x: float, y: float, theta: float):
+        with self._lock:
+            if self._client is None:
+                return
+            try:
+                self._client.sendall(struct.pack("fff", x, y, theta))
+            except OSError:
+                self._client = None
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 assets_dir = os.path.join(PROJECT_ROOT, "assets")
@@ -183,6 +220,8 @@ def main():
     recv = Receiver("127.0.0.1", 12345)
     recv.start()
 
+    broadcaster = PoseBroadcaster(POSE_PORT)
+
     locked_theta = 0.0  # predicted angle (deg, OpenCV frame)
     locked_x = 640.0
     locked_y = 360.0
@@ -316,7 +355,23 @@ def main():
         past_frame_gray = frame_gray.copy()
         past_frame_color = frame_color.copy()
 
+        # ── Visualise SuperGlue matches ─────────────────────────────────────────
+        # Rotation matching (step 1)
+        # rot_vis = draw_superglue_matches(
+        #     past_frame_gray, frame_gray, kpts0, kpts1, matches, conf, conf_thresh=0.5
+        # )
+        # cv2.imshow("matches_rotation", rot_vis)
+
+        # # Translation matching (step 2)
+        # trans_vis = draw_superglue_matches(
+        #     prev_aligned, curr_aligned,
+        #     kpts0_t, kpts1_t, matches_t, conf_t, conf_thresh=0.8
+        # )
+        # cv2.imshow("matches_translation", trans_vis)
+
+        # cv2.waitKey(1)  # keep windows alive
         print(f"θ={locked_theta:.2f}°, x={locked_x:.2f}, y={locked_y:.2f}")
+        broadcaster.send(locked_x, locked_y, locked_theta)
 
 
 if __name__ == "__main__":
