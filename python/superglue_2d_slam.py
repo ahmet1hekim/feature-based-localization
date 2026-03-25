@@ -294,7 +294,7 @@ def main():
                 rot_rad = math.atan2(M_center[1, 0], M_center[0, 0])
                 rot_deg = math.degrees(rot_rad)
 
-                # Angle update (your convention)
+                # Angle update
                 locked_theta -= rot_deg
                 locked_theta = normalize_deg(locked_theta)
 
