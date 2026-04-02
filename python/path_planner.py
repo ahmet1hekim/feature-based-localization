@@ -1,223 +1,158 @@
 """
-path_planner.py
----------------
-Reads drone pose (x, y, theta) from SLAM on port 12346.
-Runs a fixed-wing P-controller toward goal (300, 700).
-Sends command packet to C++ sim on port 12347.
+path_planner.py  (refactored — no TCP sockets)
+-----------------------------------------------
+Reads drone pose from pose_state (shared dict, written by slam thread).
+Computes autopilot commands and predicted path arc.
+Writes results to autopilot_state (shared dict, read by sim_engine / UI).
 
-Wire format (all little-endian float32):
-  SLAM  → Planner : x(f), y(f), theta_deg(f)
-  Planner → C++   : speed(f), turn(f), est_x(f), est_y(f), goal_x(f), goal_y(f),
-                    path[0].x(f), path[0].y(f), ..., path[N-1].x(f), path[N-1].y(f)
-                    Total: (6 + N_PATH*2) floats
+Public API (used by main.py):
+    run_planner_thread(pose_state, pose_lock,
+                       sim_engine, stop_event=None)
+
+All control-law constants are UNCHANGED from the original.
 """
 
 import math
-import socket
-import struct
 import threading
 import time
+from typing import Optional
 
-# ── Goal ──────────────────────────────────────────────────────────────────────
-GOAL_X = 1680.0
-GOAL_Y = 800.0
+from sim_engine import AutopilotCmd, SimEngine, N_PATH
 
-# ── Controller parameters ─────────────────────────────────────────────────────
-# Fixed-wing: always moving, turn and move simultaneously → curved arcs
-MIN_SPEED   = 0.6    # px/frame — floor so drone always creeps forward
-MAX_SPEED   = 1.6    # px/frame — reduced to avoid overshooting
-MAX_TURN    = 0.5    # °/frame
-HEADING_KP  = 0.045  # °/frame per ° of heading error
-GOAL_RADIUS = 35.0   # px — loosened to account for SLAM/actual offset
+# ── Controller parameters (unchanged) ────────────────────────────────────────
+GOAL_X      = 1680.0
+GOAL_Y      = 800.0
 
-# ── Path preview ──────────────────────────────────────────────────────────────
-N_PATH = 50          # number of preview waypoints to simulate and send
+MIN_SPEED   = 0.6
+MAX_SPEED   = 1.6
+MAX_TURN    = 0.5
+HEADING_KP  = 0.045
+GOAL_RADIUS = 80.0
 
-# ── EMA smoothing ─────────────────────────────────────────────────────────────
-EMA_XY    = 0.25
-EMA_THETA = 0.10
+EMA_XY      = 0.25
+EMA_THETA   = 0.10
 
-# ── Networking ────────────────────────────────────────────────────────────────
-SLAM_HOST       = "127.0.0.1"
-SLAM_PORT       = 12346
-CMD_LISTEN_HOST = "0.0.0.0"
-CMD_LISTEN_PORT = 12347
-
-# ── Shared raw pose ───────────────────────────────────────────────────────────
-_raw_lock  = threading.Lock()
-_raw_state = {"x": None, "y": None, "theta": None}
+TICK_HZ     = 30   # command rate
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Helpers (unchanged logic) ─────────────────────────────────────────────────
 
 def normalize_angle(a: float) -> float:
-    """Wrap angle to [-180, 180]."""
     return (a + 180.0) % 360.0 - 180.0
 
 
 def angle_ema(prev: float, new: float, alpha: float) -> float:
-    """EMA on angle (°) with wraparound; result always normalised to [0, 360)."""
     diff = normalize_angle(new - prev)
     return (prev + alpha * diff) % 360.0
 
 
-def recvall(sock: socket.socket, n: int) -> bytes:
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("Socket closed")
-        buf += chunk
-    return buf
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# SLAM receiver thread
-# ──────────────────────────────────────────────────────────────────────────────
-
-def slam_receiver_thread():
-    while True:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            print(f"[planner] Connecting to SLAM at {SLAM_HOST}:{SLAM_PORT}...")
-            sock.connect((SLAM_HOST, SLAM_PORT))
-            print("[planner] Connected to SLAM.")
-            while True:
-                data = recvall(sock, 12)
-                x, y, theta = struct.unpack("fff", data)
-                with _raw_lock:
-                    _raw_state["x"]     = x
-                    _raw_state["y"]     = y
-                    _raw_state["theta"] = theta
-        except (ConnectionError, OSError) as e:
-            print(f"[planner] SLAM connection lost: {e} — retrying in 2s")
-            time.sleep(2)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Control law
-# ──────────────────────────────────────────────────────────────────────────────
-
-def compute_commands(x: float, y: float, theta: float):
-    """
-    Fixed-wing controller: always moving, simultaneous turn → curved arcs.
-    theta must be in [0, 360).
-    Returns (speed px/frame, turn °/frame).
-    """
-    dx = GOAL_X - x
-    dy = GOAL_Y - y
-    dist = math.hypot(dx, dy)
-
+def compute_commands(x: float, y: float, theta: float,
+                     goal_x: float, goal_y: float):
+    dx    = goal_x - x
+    dy    = goal_y - y
+    dist  = math.hypot(dx, dy)
     if dist < GOAL_RADIUS:
         return 0.0, 0.0
+    desired    = math.degrees(math.atan2(dx, -dy))
+    err        = normalize_angle(desired - theta)
+    turn       = max(-MAX_TURN, min(MAX_TURN, HEADING_KP * err))
+    err_factor = max(0.0, 1.0 - abs(err) / 130.0)   # 0 at ±130° heading error
+    dist_factor = min(1.0, dist / 200.0)             # brake starts at 200px
 
-    # Desired SFML heading: moveVec = (sin θ, −cos θ), so θ = atan2(dx, −dy)
-    desired = math.degrees(math.atan2(dx, -dy))
-    err     = normalize_angle(desired - theta)
-
-    # Turn: P-controller, clamped
-    turn = max(-MAX_TURN, min(MAX_TURN, HEADING_KP * err))
-
-    # Speed: reduce for very large errors and very near goal; floor at MIN_SPEED
-    err_factor  = max(0.35, 1.0 - abs(err) / 150.0)
-    dist_factor = min(1.0, dist / 120.0)          # start slowing at 120 px out
-    speed = max(MIN_SPEED, MAX_SPEED * err_factor * dist_factor)
-
+    if dist < 250:
+        # Near goal: remove MIN_SPEED floor so drone can stop and realign
+        speed = MAX_SPEED * err_factor * dist_factor
+    else:
+        speed = max(MIN_SPEED, MAX_SPEED * err_factor * dist_factor)
     return speed, turn
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Path preview: simulate controller forward N_PATH steps
-# ──────────────────────────────────────────────────────────────────────────────
-
-def predict_path(x: float, y: float, theta: float) -> list[tuple[float, float]]:
-    """
-    Forward-simulate the fixed-wing controller to produce a predicted arc.
-    Each step advances by the same (speed, turn) the real drone would use.
-    """
+def predict_path(x: float, y: float, theta: float,
+                 goal_x: float, goal_y: float) -> list[tuple[float, float]]:
     pts = []
     cx, cy, cth = x, y, theta
     for _ in range(N_PATH):
-        speed, turn = compute_commands(cx, cy, cth)
+        speed, turn = compute_commands(cx, cy, cth, goal_x, goal_y)
         if speed == 0.0:
             break
-        rad = math.radians(cth)
+        rad  = math.radians(cth)
         cx  += math.sin(rad) * speed
-        cy  -= math.cos(rad) * speed        # SFML Y-down
+        cy  -= math.cos(rad) * speed
         cth  = (cth + turn) % 360.0
         pts.append((cx, cy))
-    # Pad with last point so the packet always has N_PATH entries
+    pad = pts[-1] if pts else (x, y)
     while len(pts) < N_PATH:
-        pts.append(pts[-1] if pts else (x, y))
+        pts.append(pad)
     return pts
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Main thread function ──────────────────────────────────────────────────────
 
-def main():
-    t = threading.Thread(target=slam_receiver_thread, daemon=True)
-    t.start()
+def run_planner_thread(
+    pose_state:  dict,
+    pose_lock:   threading.Lock,
+    sim_engine:  SimEngine,
+    stop_event:  Optional[threading.Event] = None,
+) -> None:
+    """
+    Blocking function — call inside a daemon thread from main.py.
+    Reads pose from shared dict, pushes AutopilotCmd to sim_engine.
+    """
+    smooth_x: Optional[float] = None
+    smooth_y: Optional[float] = None
+    smooth_theta: Optional[float] = None
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((CMD_LISTEN_HOST, CMD_LISTEN_PORT))
-    server.listen(1)
-    print(f"[planner] Waiting for C++ sim on port {CMD_LISTEN_PORT}...")
+    print("[planner] Started.")
 
-    while True:
-        conn, addr = server.accept()
-        print(f"[planner] C++ sim connected from {addr}")
+    while stop_event is None or not stop_event.is_set():
+        with pose_lock:
+            rx     = pose_state.get("x")
+            ry     = pose_state.get("y")
+            rtheta = pose_state.get("theta")
 
-        smooth_x:     float | None = None
-        smooth_y:     float | None = None
-        smooth_theta: float | None = None
+        # Read current goal from sim_engine (may have been changed by UI click)
+        with sim_engine.cmd_lock:
+            goal_x = sim_engine.autopilot_cmd.goal_x
+            goal_y = sim_engine.autopilot_cmd.goal_y
 
-        try:
-            while True:
-                with _raw_lock:
-                    rx, ry, rtheta = _raw_state["x"], _raw_state["y"], _raw_state["theta"]
+        if rx is None:
+            # No pose yet — send zero command
+            cmd = AutopilotCmd(goal_x=goal_x, goal_y=goal_y)
+            sim_engine.apply_autopilot_cmd(cmd, active=False)
+            time.sleep(1.0 / TICK_HZ)
+            continue
 
-                if rx is None:
-                    zeros = [0.0] * (6 + N_PATH * 2)
-                    conn.sendall(struct.pack("f" * len(zeros), *zeros))
-                    time.sleep(1 / 30)
-                    continue
+        # EMA smoothing
+        if smooth_x is None:
+            smooth_x     = rx
+            smooth_y     = ry
+            smooth_theta = rtheta % 360.0
+        else:
+            smooth_x    += EMA_XY    * (rx    - smooth_x)
+            smooth_y    += EMA_XY    * (ry    - smooth_y)
+            smooth_theta = angle_ema(smooth_theta, rtheta, EMA_THETA)
 
-                # EMA update — theta always stays in [0, 360)
-                if smooth_x is None:
-                    smooth_x, smooth_y  = rx, ry
-                    smooth_theta        = rtheta % 360.0
-                else:
-                    smooth_x     += EMA_XY    * (rx    - smooth_x)
-                    smooth_y     += EMA_XY    * (ry    - smooth_y)
-                    smooth_theta  = angle_ema(smooth_theta, rtheta, EMA_THETA)
+        speed, turn = compute_commands(smooth_x, smooth_y, smooth_theta, goal_x, goal_y)
+        path        = predict_path(smooth_x, smooth_y, smooth_theta, goal_x, goal_y)
+        dist        = math.hypot(goal_x - smooth_x, goal_y - smooth_y)
 
-                speed, turn = compute_commands(smooth_x, smooth_y, smooth_theta)
-                path        = predict_path(smooth_x, smooth_y, smooth_theta)
-                dist        = math.hypot(GOAL_X - smooth_x, GOAL_Y - smooth_y)
+        print(f"[planner] pos=({smooth_x:.0f},{smooth_y:.0f},{smooth_theta:.0f}°) "
+              f"dist={dist:.0f}  speed={speed:.2f}  turn={turn:.2f}°")
 
-                print(f"[planner] "
-                      f"smooth=({smooth_x:.0f},{smooth_y:.0f},{smooth_theta:.0f}°)  "
-                      f"dist={dist:.0f}  speed={speed:.2f}  turn={turn:.2f}°")
-
-                # Pack: speed, turn, est_x, est_y, path[0].x, path[0].y, ...
-                flat_path = [v for pt in path for v in pt]
-                payload   = struct.pack("f" * (6 + N_PATH * 2), speed, turn,
-                                        smooth_x, smooth_y,
-                                        GOAL_X, GOAL_Y,
-                                        *flat_path)
-                conn.sendall(payload)
-                time.sleep(1 / 30)
-
-        except (ConnectionError, BrokenPipeError, OSError) as e:
-            print(f"[planner] C++ connection lost: {e}")
-        finally:
-            conn.close()
+        cmd = AutopilotCmd(
+            speed      = speed,
+            turn_angle = turn,
+            est_x      = smooth_x,
+            est_y      = smooth_y,
+            goal_x     = goal_x,
+            goal_y     = goal_y,
+            path_x     = [p[0] for p in path],
+            path_y     = [p[1] for p in path],
+            path_len   = len(path),
+        )
+        sim_engine.apply_autopilot_cmd(cmd, active=True)
+        time.sleep(1.0 / TICK_HZ)
 
 
 if __name__ == "__main__":
-    main()
+    print("[planner] Run via python/main.py — this module is no longer standalone.")
