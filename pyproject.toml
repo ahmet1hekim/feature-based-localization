@@ -1,0 +1,15 @@
+[project]
+name = "fbl"
+version = "0.1.0"
+description = "Feature Based Localization"
+authors = [{ name = "Author" }]
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "torch",
+    "dearpygui",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
