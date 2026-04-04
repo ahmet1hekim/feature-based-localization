@@ -159,16 +159,14 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
 
     cmd = state.cmd
 
-    # Global path (straight lines between waypoints)
-    if len(state.waypoints) > 1:
+    # Global path (curved spline / dense path provided by path_planner)
+    if cmd.global_path_x and len(cmd.global_path_x) > 1:
         global_col = (180, 100, 255)
-        for i in range(1, len(state.waypoints)):
-            w1 = state.waypoints[i-1]
-            w2 = state.waypoints[i]
-            cv2.line(canvas, s(w1[0], w1[1]), s(w2[0], w2[1]), global_col, 2, cv2.LINE_AA)
-            
-    # Or if GlobalPlanner provides dense points in future:
-    # if len(cmd.global_path_x) > 1: ...
+        for i in range(1, len(cmd.global_path_x)):
+            cv2.line(canvas, 
+                     s(cmd.global_path_x[i-1], cmd.global_path_y[i-1]), 
+                     s(cmd.global_path_x[i],   cmd.global_path_y[i]), 
+                     global_col, 2, cv2.LINE_AA)
 
     # Draw waypoints as circles
     wp_r = max(4, int(8 * zoom))

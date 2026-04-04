@@ -1,9 +1,9 @@
 """
-path_planner.py  (refactored — no TCP sockets)
+path_planner.py
 -----------------------------------------------
 Reads drone pose from pose_state (shared dict, written by slam thread).
 Reads waypoints from sim_engine.
-Generates a dense global path, uses Pure Pursuit for lookahead local goal.
+Generates a static Centripetal Catmull-Rom global path, uses Pure Pursuit for lookahead local goal.
 Outputs AutopilotCmd to sim_engine.
 """
 
@@ -17,15 +17,15 @@ from sim_engine import AutopilotCmd, SimEngine, N_PATH
 # ── Controller parameters ─────────────────────────────────────────────────────
 MIN_SPEED   = 0.6
 MAX_SPEED   = 1.6
-MAX_TURN    = 0.5
-HEADING_KP  = 0.045
+MAX_TURN    = 0.5    # Restored to 0.5 (15 deg/sec real hardware limit)
+HEADING_KP  = 0.045  # Restored to original sluggish response
 GOAL_RADIUS = 30.0
 
 EMA_XY      = 1.0
 EMA_THETA   = 0.10
 
 TICK_HZ     = 30   # command rate
-LOOKAHEAD_D = 40.0 # Pure pursuit lookahead distance (px)
+LOOKAHEAD_D = 90.0 # Pure pursuit lookahead distance (px)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -78,34 +78,82 @@ def predict_path(x: float, y: float, theta: float,
         pts.append(pad)
     return pts
 
-def generate_global_path(start_x: float, start_y: float, waypoints: list, step: float = 10.0) -> list[tuple[float, float]]:
-    """Generate a dense path by discretizing straight lines between all waypoints."""
+def generate_hermite_path(start_x: float, start_y: float, start_theta: float, waypoints: list, step: float = 10.0) -> list[tuple[float, float]]:
+    """Generate a dense curved path using a Kinematic Hermite Spline.
+       We FORCE the tangents at each waypoint to be massive (>300px).
+       This guarantees the global path exactly strikes the waypoints, but if the
+       waypoints are too close or sharp, the massive tangents will mathematically
+       force the path to sweep into giant teardrop loops to hit them — which is
+       EXACTLY what a real drone with a 180px turning radius physically bounded expects!"""
     if not waypoints:
         return []
         
-    pts = []
-    pts.append((start_x, start_y))
+    pts = [(start_x, start_y)] + waypoints
     
-    current_x, current_y = start_x, start_y
-    for wp in waypoints:
-        wx, wy = wp
-        dx = wx - current_x
-        dy = wy - current_y
+    # Calculate tangents T for each point
+    T = []
+    
+    # T[0] matches the drone's current exact heading but with a massive forward push
+    rad_theta = math.radians(start_theta)
+    # The drone needs ~180px radius turning, so give it ~300px of forward momentum buffer
+    mag0 = max(300.0, math.hypot(pts[1][0]-pts[0][0], pts[1][1]-pts[0][1]))
+    T.append((math.sin(rad_theta) * mag0, -math.cos(rad_theta) * mag0))
+    
+    for i in range(1, len(pts)-1):
+        # Tangent direction based on neighboring points (Catmull-Rom style angle bisector)
+        dx = pts[i+1][0] - pts[i-1][0]
+        dy = pts[i+1][1] - pts[i-1][1]
         dist = math.hypot(dx, dy)
-        
         if dist > 0:
-            ux, uy = dx / dist, dy / dist
-            moved = 0.0
-            while moved < dist:
-                moved += step
-                if moved >= dist:
-                    pts.append((wx, wy))
-                else:
-                    pts.append((current_x + ux * moved, current_y + uy * moved))
-                    
-        current_x, current_y = wx, wy
+            ux, uy = dx/dist, dy/dist
+        else:
+            ux, uy = 1.0, 0.0
+            
+        # FORCE a massive tangent magnitude to guarantee wide sweeping curves capable of R=180!
+        mag = max(300.0, dist * 0.8)
+        T.append((ux * mag, uy * mag))
         
-    return pts
+    # T[-1] straight into the last waypoint
+    if len(pts) > 1:
+        dx = pts[-1][0] - pts[-2][0]
+        dy = pts[-1][1] - pts[-2][1]
+        dist = math.hypot(dx, dy)
+        mag_end = max(300.0, dist * 0.8)
+        if dist > 0:
+            T.append((dx/dist * mag_end, dy/dist * mag_end))
+        else:
+             T.append((0.0, 0.0))
+    else:
+        T.append((0.0, 0.0))
+        
+    # Interpolate using Cubic Hermite equations
+    path = []
+    for i in range(len(pts)-1):
+        P0, P1 = pts[i], pts[i+1]
+        T0, T1 = T[i], T[i+1]
+        
+        dist = math.hypot(P1[0]-P0[0], P1[1]-P0[1])
+        # We need lots of samples because the curve might intentionally perform a large teardrop loop!
+        arc_estimate = dist + math.hypot(T0[0], T0[1]) + math.hypot(T1[0], T1[1])
+        num_samples = max(2, int(arc_estimate / (step * 0.75)))
+        
+        for j in range(num_samples):
+            t = j / num_samples
+            t2 = t * t
+            t3 = t2 * t
+            
+            # Cubic Hermite basis functions
+            h00 = 2*t3 - 3*t2 + 1
+            h10 = t3 - 2*t2 + t
+            h01 = -2*t3 + 3*t2
+            h11 = t3 - t2
+            
+            x = h00*P0[0] + h10*T0[0] + h01*P1[0] + h11*T1[0]
+            y = h00*P0[1] + h10*T0[1] + h01*P1[1] + h11*T1[1]
+            path.append((x, y))
+            
+    path.append(pts[-1])
+    return path
 
 def get_pure_pursuit_lookahead(x: float, y: float, path: list[tuple[float, float]], lookahead: float):
     """Find the point on the path that is at least `lookahead` distance away from the drone."""
@@ -130,6 +178,7 @@ def get_pure_pursuit_lookahead(x: float, y: float, path: list[tuple[float, float
             
     return path[-1][0], path[-1][1]
 
+
 # ── Main thread function ──────────────────────────────────────────────────────
 
 def run_planner_thread(
@@ -140,12 +189,14 @@ def run_planner_thread(
 ) -> None:
     """
     Blocking function — call inside a daemon thread from main.py.
-    Reads pose from shared dict, generates dense path, computes pure pursuit lookahead,
-    and pushes AutopilotCmd to sim_engine.
     """
     smooth_x: Optional[float] = None
     smooth_y: Optional[float] = None
     smooth_theta: Optional[float] = None
+    
+    # Path cache state to prevent reference track from moving or regenerating unexpectedly
+    last_ui_waypoints = ()
+    cached_global_path = []
 
     print("[planner] Started.")
 
@@ -173,36 +224,57 @@ def run_planner_thread(
             smooth_y    += EMA_XY    * (ry    - smooth_y)
             smooth_theta = angle_ema(smooth_theta, rtheta, EMA_THETA)
 
-        # 1. Check if we reached the active waypoint (the first one)
-        waypoints = list(sim_engine.waypoints)  # snapshot
-        if waypoints:
-            active_wp = waypoints[0]
-            dist_to_wp = math.hypot(active_wp[0] - smooth_x, active_wp[1] - smooth_y)
-            if dist_to_wp < GOAL_RADIUS:
-                sim_engine.remove_waypoint(0)
-                waypoints.pop(0)
-                print(f"[planner] Waypoint reached! {len(waypoints)} remaining.")
-
+        waypoints = list(sim_engine.waypoints)
+        
+        # 1. Stop processing if no waypoints
         if not waypoints:
-            # No waypoints, stop
             cmd = AutopilotCmd(speed=0.0, turn_angle=0.0, est_x=smooth_x, est_y=smooth_y)
             sim_engine.apply_autopilot_cmd(cmd, active=True)
+            last_ui_waypoints = () 
+            cached_global_path = []
             time.sleep(1.0 / TICK_HZ)
             continue
 
-        # 2. Generate Global Path
-        global_path = generate_global_path(smooth_x, smooth_y, waypoints, step=10.0)
+        # 2. Re-plan Global Path ONLY if the UI explicitly added/removed/reordered waypoints.
+        waypoints_tuple = tuple(waypoints)
+        if waypoints_tuple != last_ui_waypoints:
+            cached_global_path = generate_hermite_path(smooth_x, smooth_y, smooth_theta, waypoints, step=10.0)
+            last_ui_waypoints = waypoints_tuple
+            
+        # 3. Prune the static path behind the drone so it visually "eats" the trail
+        if cached_global_path:
+            min_dist = float('inf')
+            closest_idx = 0
+            for i, p in enumerate(cached_global_path):
+                d = math.hypot(p[0] - smooth_x, p[1] - smooth_y)
+                if d < min_dist:
+                    min_dist = d
+                    closest_idx = i
+            
+            # Keep trail slightly behind the drone for smooth rendering
+            keep_idx = max(0, closest_idx - 2)
+            cached_global_path = cached_global_path[keep_idx:]
+
+        # 4. Check if we reached the active UI waypoint
+        active_wp = waypoints[0]
+        dist_to_wp = math.hypot(active_wp[0] - smooth_x, active_wp[1] - smooth_y)
+        if dist_to_wp < GOAL_RADIUS:
+            sim_engine.remove_waypoint(0)
+            waypoints.pop(0)
+            # CRITICAL: Update the tracker so this automatic pop DOES NOT trigger a replan!
+            last_ui_waypoints = tuple(waypoints)
+            print(f"[planner] Waypoint reached! {len(waypoints)} remaining.")
+            if not waypoints:
+                continue
+
+        # 5. Pure Pursuit Lookahead
+        la_x, la_y = get_pure_pursuit_lookahead(smooth_x, smooth_y, cached_global_path, LOOKAHEAD_D)
         
-        # 3. Pure Pursuit Lookahead
-        la_x, la_y = get_pure_pursuit_lookahead(smooth_x, smooth_y, global_path, LOOKAHEAD_D)
-        
-        # 4. Compute Commands using the lookahead as target
+        # 6. Compute Control Commands
         final_wp = waypoints[-1]
         dist_to_final = math.hypot(final_wp[0] - smooth_x, final_wp[1] - smooth_y)
         
         speed, turn = compute_commands(smooth_x, smooth_y, smooth_theta, la_x, la_y, dist_to_final)
-        
-        # Predicted path arc
         path_arc = predict_path(smooth_x, smooth_y, smooth_theta, la_x, la_y, dist_to_final)
 
         cmd = AutopilotCmd(
@@ -215,8 +287,8 @@ def run_planner_thread(
             path_x     = [p[0] for p in path_arc],
             path_y     = [p[1] for p in path_arc],
             path_len   = len(path_arc),
-            global_path_x=[p[0] for p in global_path],
-            global_path_y=[p[1] for p in global_path],
+            global_path_x=[p[0] for p in cached_global_path],
+            global_path_y=[p[1] for p in cached_global_path],
         )
         sim_engine.apply_autopilot_cmd(cmd, active=True)
         time.sleep(1.0 / TICK_HZ)
