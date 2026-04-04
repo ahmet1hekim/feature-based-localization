@@ -156,14 +156,9 @@ class SimEngine:
             active = self.autopilot_active
 
         if not manual and active:
-            # Real-position goal check: stop regardless of SLAM drift
-            real_dist = math.hypot(self._pos_x - cmd.goal_x,
-                                   self._pos_y - cmd.goal_y)
-            if real_dist < 50.0:   # generous stop radius for real pos
-                self._move_y = 0.0
-            else:
-                self._angle += cmd.turn_angle
-                self._move_y = cmd.speed
+            # Planner already zero-ed speed when SLAM estimate is within GOAL_RADIUS
+            self._angle  += cmd.turn_angle
+            self._move_y  = cmd.speed
 
         # Movement
         rad = math.radians(self._angle)
@@ -184,11 +179,17 @@ class SimEngine:
         # Generate drone-cam frame
         cam_frame = self._render_cam_frame()
 
-        # Push to SLAM queue (SLAM consumes this)
+        # Push to SLAM queue — always replace with the latest frame.
+        # Drain the stale frame first so SLAM wakes up to the freshest image,
+        # not a frame that was put right after the previous get() ~500ms ago.
         try:
-            self.frame_queue.put_nowait((cam_frame, self._angle))
+            self.frame_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self.frame_queue.put_nowait(cam_frame)
         except queue.Full:
-            pass  # SLAM is slower than the UI; silently drop
+            pass
 
         # Store latest for UI display (UI reads this directly, no queue contention)
         with self._cam_lock:

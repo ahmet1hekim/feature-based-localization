@@ -8,7 +8,7 @@ Public API (used by main.py):
     run_slam_thread(frame_queue, pose_state, pose_lock,
                     match_queue=None, stop_event=None)
 
-`frame_queue`  : queue.Queue of (cam_frame_bgr: np.ndarray, drone_angle: float)
+`frame_queue`  : queue.Queue of cam_frame_bgr: np.ndarray
 `pose_state`   : dict  {"x": float, "y": float, "theta": float}
 `pose_lock`    : threading.Lock protecting pose_state
 `match_queue`  : optional queue.Queue for (rot_vis, trans_vis) debug images
@@ -141,15 +141,9 @@ def run_slam_thread(
         # SuperGlue takes ~200-500 ms; the sim generates frames at ~60 fps.
         # Without draining, SLAM would lag hundreds of frames behind reality.
         try:
-            frame_bgr, drone_angle = frame_queue.get(timeout=0.5)
+            frame_bgr = frame_queue.get(timeout=0.5)
         except queue.Empty:
             continue
-        # Discard any additional stale frames that piled up while we were busy
-        while not frame_queue.empty():
-            try:
-                frame_bgr, drone_angle = frame_queue.get_nowait()
-            except queue.Empty:
-                break
 
         h, w = frame_bgr.shape[:2]
         frame_color = frame_bgr

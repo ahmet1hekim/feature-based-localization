@@ -27,9 +27,9 @@ MIN_SPEED   = 0.6
 MAX_SPEED   = 1.6
 MAX_TURN    = 0.5
 HEADING_KP  = 0.045
-GOAL_RADIUS = 80.0
+GOAL_RADIUS = 40.0
 
-EMA_XY      = 0.25
+EMA_XY      = 1.0
 EMA_THETA   = 0.10
 
 TICK_HZ     = 30   # command rate
