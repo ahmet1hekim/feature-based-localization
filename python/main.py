@@ -189,23 +189,27 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
             cv2.circle(canvas, s(cmd.path_x[i], cmd.path_y[i]),
                        dot_r(), arc_col, -1, cv2.LINE_AA)
 
+    has_active_mission = len(state.waypoints) > 0
+
     # Dashed line: drone → current active local goal (which may be a lookahead point)
-    if show_dash:
+    if show_dash and has_active_mission:
         _dashed_line(canvas, s(state.pos_x, state.pos_y),
                      s(cmd.goal_x, cmd.goal_y), (0, 220, 255), thickness=1)
 
     # Local goal marker (pure pursuit lookahead point or actual waypoint)
-    gr = max(6, int(10 * zoom))
-    cv2.circle(canvas, s(cmd.goal_x, cmd.goal_y), gr, (0, 220, 255), -1, cv2.LINE_AA)
-    cv2.circle(canvas, s(cmd.goal_x, cmd.goal_y), gr, (255, 255, 255),  1, cv2.LINE_AA)
+    if has_active_mission:
+        gr = max(6, int(10 * zoom))
+        cv2.circle(canvas, s(cmd.goal_x, cmd.goal_y), gr, (0, 220, 255), -1, cv2.LINE_AA)
+        cv2.circle(canvas, s(cmd.goal_x, cmd.goal_y), gr, (255, 255, 255),  1, cv2.LINE_AA)
 
     # SLAM estimated pos
     if show_slam and (cmd.est_x > 0 or cmd.est_y > 0):
         sr = max(5, int(10 * zoom))
         cv2.circle(canvas, s(cmd.est_x, cmd.est_y), sr, (255, 180, 50), -1, cv2.LINE_AA)
         cv2.circle(canvas, s(cmd.est_x, cmd.est_y), sr, (255, 255, 255),  1, cv2.LINE_AA)
-        _dashed_line(canvas, s(cmd.est_x, cmd.est_y), s(cmd.goal_x, cmd.goal_y),
-                     (255, 180, 50), dash=8, gap=6)
+        if has_active_mission:
+            _dashed_line(canvas, s(cmd.est_x, cmd.est_y), s(cmd.goal_x, cmd.goal_y),
+                         (255, 180, 50), dash=8, gap=6)
 
     # Drone (filled rotated rectangle)
     rw = max(8, int(20 * zoom))
@@ -332,7 +336,15 @@ def main():
                     with dpg.group(horizontal=True):
                         def on_start(): engine.is_running = True
                         def on_stop():  engine.is_running = False
-                        def on_reset(): engine.reset_state()
+                        def on_reset():
+                            engine.reset_state()
+                            with pose_lock:
+                                pose_state["reset_slam"] = True
+                                pose_state["reset_planner"] = True
+                            
+                            # Give visual feedback of match wipe
+                            empty_match = np.zeros((MATCH_IMG_H, RIGHT_W, 3), dtype=np.uint8)
+                            upload_resized("match_tex", empty_match, RIGHT_W, MATCH_IMG_H)
                         
                         dpg.add_button(label=" ▶ Start ", callback=on_start)
                         dpg.add_button(label=" ⏸ Stop ", callback=on_stop)

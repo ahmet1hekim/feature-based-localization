@@ -160,10 +160,12 @@ def get_pure_pursuit_lookahead(x: float, y: float, path: list[tuple[float, float
     if not path:
         return x, y
         
-    # Find closest point on path
+    # Find closest point on path but bounding the search window to prevent jumping across overlaps!
     closest_idx = 0
     min_dist = float('inf')
-    for i, p in enumerate(path):
+    search_limit = min(len(path), 40)  # ~400px parametric window max
+    for i in range(search_limit):
+        p = path[i]
         d = math.hypot(p[0] - x, p[1] - y)
         if d < min_dist:
             min_dist = d
@@ -201,14 +203,20 @@ def run_planner_thread(
     print("[planner] Started.")
 
     while stop_event is None or not stop_event.is_set():
-        if not sim_engine.is_running:
-            time.sleep(1.0 / TICK_HZ)
-            continue
-            
         with pose_lock:
             rx     = pose_state.get("x")
             ry     = pose_state.get("y")
             rtheta = pose_state.get("theta")
+            do_reset = pose_state.get("reset_planner", False)
+            if do_reset:
+                pose_state["reset_planner"] = False
+
+        if do_reset:
+            smooth_x = None
+            smooth_y = None
+            smooth_theta = None
+            last_ui_waypoints = ()
+            cached_global_path = []
 
         if rx is None:
             time.sleep(1.0 / TICK_HZ)
@@ -245,7 +253,9 @@ def run_planner_thread(
         if cached_global_path:
             min_dist = float('inf')
             closest_idx = 0
-            for i, p in enumerate(cached_global_path):
+            search_limit = min(len(cached_global_path), 40) # Prevent skipping overlaps
+            for i in range(search_limit):
+                p = cached_global_path[i]
                 d = math.hypot(p[0] - smooth_x, p[1] - smooth_y)
                 if d < min_dist:
                     min_dist = d
@@ -275,6 +285,12 @@ def run_planner_thread(
         dist_to_final = math.hypot(final_wp[0] - smooth_x, final_wp[1] - smooth_y)
         
         speed, turn = compute_commands(smooth_x, smooth_y, smooth_theta, la_x, la_y, dist_to_final)
+        
+        # If physics are paused by the user, zero out execution speeds but still update visuals!
+        if not sim_engine.is_running:
+            speed = 0.0
+            turn = 0.0
+            
         path_arc = predict_path(smooth_x, smooth_y, smooth_theta, la_x, la_y, dist_to_final)
 
         cmd = AutopilotCmd(

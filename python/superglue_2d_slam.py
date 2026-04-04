@@ -137,6 +137,27 @@ def run_slam_thread(
     rot_deg = 0.0   # keep in scope for translation step
 
     while stop_event is None or not stop_event.is_set():
+        with pose_lock:
+            do_reset = pose_state.get("reset_slam", False)
+            if do_reset:
+                pose_state["reset_slam"] = False
+
+        if do_reset:
+            locked_x = start_x
+            locked_y = start_y
+            locked_theta = 0.0
+            past_frame_gray = None
+            past_frame_color = None
+            with pose_lock:
+                pose_state["x"] = start_x
+                pose_state["y"] = start_y
+                pose_state["theta"] = 0.0
+            # Flush stale frames
+            while not frame_queue.empty():
+                try: frame_queue.get_nowait()
+                except queue.Empty: break
+            continue
+
         # Drain the queue — always process only the LATEST frame.
         # SuperGlue takes ~200-500 ms; the sim generates frames at ~60 fps.
         # Without draining, SLAM would lag hundreds of frames behind reality.
