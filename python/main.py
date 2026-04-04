@@ -159,6 +159,27 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
 
     cmd = state.cmd
 
+    # Global path (straight lines between waypoints)
+    if len(state.waypoints) > 1:
+        global_col = (180, 100, 255)
+        for i in range(1, len(state.waypoints)):
+            w1 = state.waypoints[i-1]
+            w2 = state.waypoints[i]
+            cv2.line(canvas, s(w1[0], w1[1]), s(w2[0], w2[1]), global_col, 2, cv2.LINE_AA)
+            
+    # Or if GlobalPlanner provides dense points in future:
+    # if len(cmd.global_path_x) > 1: ...
+
+    # Draw waypoints as circles
+    wp_r = max(4, int(8 * zoom))
+    for i, wp in enumerate(state.waypoints):
+        wp_color = (0, 100, 255) if i == 0 else (0, 200, 255)
+        cv2.circle(canvas, s(wp[0], wp[1]), wp_r, wp_color, -1, cv2.LINE_AA)
+        cv2.circle(canvas, s(wp[0], wp[1]), wp_r, (255, 255, 255), 1, cv2.LINE_AA)
+        # Draw index
+        cv2.putText(canvas, str(i), s(wp[0] + 15, wp[1] - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+
     # Path arc
     if show_arc and cmd.path_len > 1:
         arc_col = (50, 220, 80)
@@ -170,13 +191,13 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
             cv2.circle(canvas, s(cmd.path_x[i], cmd.path_y[i]),
                        dot_r(), arc_col, -1, cv2.LINE_AA)
 
-    # Dashed line: drone → goal
+    # Dashed line: drone → current active local goal (which may be a lookahead point)
     if show_dash:
         _dashed_line(canvas, s(state.pos_x, state.pos_y),
                      s(cmd.goal_x, cmd.goal_y), (0, 220, 255), thickness=1)
 
-    # Goal marker
-    gr = max(6, int(14 * zoom))
+    # Local goal marker (pure pursuit lookahead point or actual waypoint)
+    gr = max(6, int(10 * zoom))
     cv2.circle(canvas, s(cmd.goal_x, cmd.goal_y), gr, (0, 220, 255), -1, cv2.LINE_AA)
     cv2.circle(canvas, s(cmd.goal_x, cmd.goal_y), gr, (255, 255, 255),  1, cv2.LINE_AA)
 
@@ -258,8 +279,10 @@ def main():
         dpg.add_dynamic_texture(RIGHT_W, MATCH_IMG_H, blank_match, tag="match_tex")
 
     # Seed map with initial viewport immediately
-    init_frame = DroneState(pos_x=init_x, pos_y=init_y,
-                            cmd=AutopilotCmd(goal_x=1680.0, goal_y=800.0))
+    init_cmd = AutopilotCmd()
+    init_cmd.goal_x = init_x
+    init_cmd.goal_y = init_y
+    init_frame = DroneState(pos_x=init_x, pos_y=init_y, cmd=init_cmd)
     upload_map(render_map_frame(engine.background, mv, init_frame, True, True, True))
 
     # ── Theme ─────────────────────────────────────────────────────────────────
@@ -306,18 +329,77 @@ def main():
                 with dpg.child_window(height=INFO_H, no_scrollbar=True, border=False):
                     dpg.add_text("Controls & Info", color=(255, 220, 120, 255))
                     dpg.add_separator()
+                    
+                    # SIMULATION CONTROLS
+                    with dpg.group(horizontal=True):
+                        def on_start(): engine.is_running = True
+                        def on_stop():  engine.is_running = False
+                        def on_reset(): engine.reset_state()
+                        
+                        dpg.add_button(label=" ▶ Start ", callback=on_start)
+                        dpg.add_button(label=" ⏸ Stop ", callback=on_stop)
+                        dpg.add_button(label=" ↺ Reset ", callback=on_reset)
+                        
+                    dpg.add_text(tag="txt_runtime_status", default_value="Status: STOPPED", color=(255, 100, 100, 255))
+                    dpg.add_separator()
+                    
+                    # WAYPOINT CONTROLS
+                    dpg.add_text("Waypoints (Global Path):")
+                    dpg.add_listbox(items=[], tag="list_waypoints", width=-1, num_items=5)
+                    
+                    with dpg.group(horizontal=True):
+                        def on_wp_up():
+                            idx = dpg.get_value("list_waypoints")
+                            if not idx: return
+                            wps = engine.waypoints
+                            try:
+                                i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})" for j, w in enumerate(wps)].index(idx)
+                                if i > 0:
+                                    wps[i-1], wps[i] = wps[i], wps[i-1]
+                                    engine.reorder_waypoints(wps)
+                            except ValueError: pass
+                            
+                        def on_wp_down():
+                            idx = dpg.get_value("list_waypoints")
+                            if not idx: return
+                            wps = engine.waypoints
+                            try:
+                                i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})" for j, w in enumerate(wps)].index(idx)
+                                if i < len(wps) - 1:
+                                    wps[i+1], wps[i] = wps[i], wps[i+1]
+                                    engine.reorder_waypoints(wps)
+                            except ValueError: pass
+
+                        def on_wp_del():
+                            idx = dpg.get_value("list_waypoints")
+                            if not idx: return
+                            wps = engine.waypoints
+                            try:
+                                i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})" for j, w in enumerate(wps)].index(idx)
+                                engine.remove_waypoint(i)
+                            except ValueError: pass
+
+                        def on_wp_clear(): engine.clear_waypoints()
+
+                        dpg.add_button(label="↑", callback=on_wp_up)
+                        dpg.add_button(label="↓", callback=on_wp_down)
+                        dpg.add_button(label="Del", callback=on_wp_del)
+                        dpg.add_button(label="Clear", callback=on_wp_clear)
+                        
+                    dpg.add_separator()
+
                     dpg.add_checkbox(label="SLAM estimate",  tag="chk_slam", default_value=True)
                     dpg.add_checkbox(label="Path arc",       tag="chk_arc",  default_value=True)
                     dpg.add_checkbox(label="Dashed line",    tag="chk_dash", default_value=True)
                     dpg.add_separator()
-                    dpg.add_text("Scroll=zoom  Drag=pan  RClick=set goal",
+                    dpg.add_text("Scroll=zoom  Drag=pan  RClick=Ad Waypoint",
                                  color=(140, 140, 140, 180))
                     dpg.add_separator()
                     dpg.add_text("Drone", color=(160, 160, 160, 200))
                     dpg.add_text("x=---  y=---  θ=---", tag="txt_pos")
                     dpg.add_text("SLAM", color=(160, 160, 160, 200))
                     dpg.add_text("x=---  y=---",        tag="txt_slam")
-                    dpg.add_text("Goal", color=(160, 160, 160, 200))
+                    dpg.add_text("Local Goal", color=(160, 160, 160, 200))
                     dpg.add_text("x=---  y=---",        tag="txt_goal")
                     dpg.add_separator()
                     dpg.add_text("←→ rotate  ↑↓ throttle  Space boost",
@@ -348,12 +430,12 @@ def main():
 
         def on_click(s, btn):
             if btn == dpg.mvMouseButton_Right:
-                # Right-click always sets goal
+                # Right-click appends waypoint
                 mx, my = dpg.get_mouse_pos(local=False)
                 if 0 <= mx <= MAP_W and 0 <= my <= MAP_H:
                     wx, wy = mv.s2w(mx, my)
-                    engine.set_goal(wx, wy)
-                    print(f"[main] Goal → ({wx:.0f}, {wy:.0f})")
+                    engine.add_waypoint(wx, wy)
+                    print(f"[main] Added Waypoint → ({wx:.0f}, {wy:.0f})")
 
         dpg.add_mouse_wheel_handler(callback=on_scroll)
         dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, callback=on_drag)
@@ -435,6 +517,15 @@ def main():
                 if (cmd.est_x > 0 or cmd.est_y > 0) else "x=---  y=---")
             dpg.set_value("txt_goal",
                 f"x={cmd.goal_x:.0f}  y={cmd.goal_y:.0f}")
+
+            status_str = "Status: RUNNING" if state.is_running else "Status: STOPPED"
+            status_col = (100, 255, 100, 255) if state.is_running else (255, 100, 100, 255)
+            dpg.set_value("txt_runtime_status", status_str)
+            dpg.configure_item("txt_runtime_status", color=status_col)
+
+            # Update Waypoints listbox items
+            wp_strs = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})" for j, w in enumerate(state.waypoints)]
+            dpg.configure_item("list_waypoints", items=wp_strs)
 
             dpg.render_dearpygui_frame()
 

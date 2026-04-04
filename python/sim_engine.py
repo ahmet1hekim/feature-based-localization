@@ -45,11 +45,16 @@ class AutopilotCmd:
     turn_angle: float = 0.0
     est_x:      float = -1.0
     est_y:      float = -1.0
+    # Next local sub-goal
     goal_x:     float = 300.0
     goal_y:     float = 700.0
+    # Short local path arc prediction (from path planner)
     path_x:     list  = field(default_factory=lambda: [0.0] * N_PATH)
     path_y:     list  = field(default_factory=lambda: [0.0] * N_PATH)
     path_len:   int   = 0
+    # Global path points (for visualization from GlobalPlanner)
+    global_path_x: list = field(default_factory=list)
+    global_path_y: list = field(default_factory=list)
 
 
 @dataclass
@@ -61,6 +66,8 @@ class DroneState:
     cmd:      AutopilotCmd = field(default_factory=AutopilotCmd)
     bg_w:     int   = 0
     bg_h:     int   = 0
+    is_running: bool = False
+    waypoints: list = field(default_factory=list)
 
 
 # ── Sim Engine ────────────────────────────────────────────────────────────────
@@ -82,11 +89,18 @@ class SimEngine:
 
         self.bg_h, self.bg_w = self._bg.shape[:2]
 
+        self._init_x = self.bg_w / 2.0
+        self._init_y = self.bg_h / 2.0
+
         # Drone state
-        self._pos_x:  float = self.bg_w  / 2.0
-        self._pos_y:  float = self.bg_h  / 2.0
+        self._pos_x:  float = self._init_x
+        self._pos_y:  float = self._init_y
         self._angle:  float = 0.0          # degrees
         self._speed_y: float = SPEED_DEFAULT
+
+        # UI State
+        self.is_running: bool = False
+        self.waypoints: list[tuple[float, float]] = []
 
         # Keyboard-driven movement accumulator (set by tick callers)
         self._move_y: float = 0.0
@@ -110,11 +124,30 @@ class SimEngine:
     def background(self) -> np.ndarray:
         return self._bg
 
-    def set_goal(self, world_x: float, world_y: float) -> None:
-        """Called by UI when user clicks on the map to set a new goal."""
+    def reset_state(self) -> None:
+        """Reset drone to initial position, stop simulation."""
+        self.is_running = False
+        self._pos_x = self._init_x
+        self._pos_y = self._init_y
+        self._angle = 0.0
+        self._move_y = 0.0
         with self.cmd_lock:
-            self.autopilot_cmd.goal_x = float(world_x)
-            self.autopilot_cmd.goal_y = float(world_y)
+            self.autopilot_active = False
+
+    def add_waypoint(self, world_x: float, world_y: float) -> None:
+        """Called by UI to append a waypoint."""
+        self.waypoints.append((float(world_x), float(world_y)))
+
+    def clear_waypoints(self) -> None:
+        self.waypoints.clear()
+        
+    def reorder_waypoints(self, new_order: list[tuple[float, float]]) -> None:
+        """Override waypoints from the UI."""
+        self.waypoints = new_order
+
+    def remove_waypoint(self, index: int) -> None:
+        if 0 <= index < len(self.waypoints):
+            self.waypoints.pop(index)
 
     def apply_autopilot_cmd(self, cmd: AutopilotCmd, active: bool) -> None:
         """Called by path planner thread to push a new command."""
@@ -155,24 +188,28 @@ class SimEngine:
             cmd = AutopilotCmd(**self.autopilot_cmd.__dict__)
             active = self.autopilot_active
 
-        if not manual and active:
-            # Planner already zero-ed speed when SLAM estimate is within GOAL_RADIUS
-            self._angle  += cmd.turn_angle
-            self._move_y  = cmd.speed
+        if self.is_running:
+            if not manual and active:
+                # Planner already zero-ed speed when SLAM estimate is within GOAL_RADIUS
+                self._angle  += cmd.turn_angle
+                self._move_y  = cmd.speed
 
-        # Movement
-        rad = math.radians(self._angle)
-        dx  =  math.sin(rad) * self._move_y
-        dy  = -math.cos(rad) * self._move_y
+            # Movement
+            rad = math.radians(self._angle)
+            dx  =  math.sin(rad) * self._move_y
+            dy  = -math.cos(rad) * self._move_y
 
-        # Boundary clamping (half-drone-size = 15 px horiz, 10 px vert)
-        nx = self._pos_x + dx
-        ny = self._pos_y + dy
-        hw, hh = 10.0, 15.0
-        if hw <= nx <= self.bg_w - hw:
-            self._pos_x = nx
-        if hh <= ny <= self.bg_h - hh:
-            self._pos_y = ny
+            # Boundary clamping (half-drone-size = 15 px horiz, 10 px vert)
+            nx = self._pos_x + dx
+            ny = self._pos_y + dy
+            hw, hh = 10.0, 15.0
+            if hw <= nx <= self.bg_w - hw:
+                self._pos_x = nx
+            if hh <= ny <= self.bg_h - hh:
+                self._pos_y = ny
+        else:
+            # When paused, no movement overrides
+            pass
 
         self._move_y = 0.0
 
@@ -202,6 +239,8 @@ class SimEngine:
             cmd=cmd,
             bg_w=self.bg_w,
             bg_h=self.bg_h,
+            is_running=self.is_running,
+            waypoints=list(self.waypoints),
         )
 
     # ── Internal ──────────────────────────────────────────────────────────────
