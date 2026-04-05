@@ -81,11 +81,23 @@ class Application:
                         dpg.add_image("cam_tex", width=RIGHT_W, height=CAM_IMG_H)
                     dpg.add_separator()
                     with dpg.child_window(height=MATCH_H, no_scrollbar=True, border=False):
-                        dpg.add_text("▶  SuperGlue Matches", color=(160, 255, 180, 255))
+                        dpg.add_text("▶  Visual Odometry Matches", color=(160, 255, 180, 255))
                         dpg.add_image("match_tex", width=RIGHT_W, height=MATCH_IMG_H)
                     dpg.add_separator()
                     with dpg.child_window(height=INFO_H, no_scrollbar=True, border=False):
                         dpg.add_text("Controls & Info", color=(255, 220, 120, 255))
+                        dpg.add_separator()
+                        
+                        def on_matcher_change(s, data):
+                            with self.pose_lock:
+                                self.pose_state["switch_matcher"] = data
+
+                        dpg.add_combo(
+                            items=["SuperGlue", "LightGlue", "MatchAnything"],
+                            default_value="SuperGlue",
+                            callback=on_matcher_change,
+                            width=-1
+                        )
                         dpg.add_separator()
                         
                         with dpg.group(horizontal=True):
@@ -94,7 +106,7 @@ class Application:
                             def on_reset():
                                 self.engine.reset_state()
                                 with self.pose_lock:
-                                    self.pose_state["reset_slam"] = True
+                                    self.pose_state["reset_vo"] = True
                                     self.pose_state["reset_planner"] = True
                                 upload_resized("match_tex", np.zeros((MATCH_IMG_H, RIGHT_W, 3), dtype=np.uint8), RIGHT_W, MATCH_IMG_H)
                             

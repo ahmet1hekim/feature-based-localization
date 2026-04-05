@@ -5,29 +5,8 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import torch
 
-try:
-    from externals.SuperGluePretrainedNetwork.models.matching import Matching
-except ImportError:
-    import sys
-    import os
-    # Add project root to path so externals works as before
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-    from externals.SuperGluePretrainedNetwork.models.matching import Matching
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-config = {
-    "superpoint": {"nms_radius": 4, "keypoint_threshold": 0.005, "max_keypoints": 1024},
-    "superglue": {
-        "weights": "outdoor",
-        "sinkhorn_iterations": 20,
-        "match_threshold": 0.2,
-    },
-}
+from .matchers.base import BaseMatcher
 
 def normalize_deg(a: float) -> float:
     return (a + 360.0) % 360.0
@@ -69,31 +48,11 @@ def preprocess_image(img, center_x, center_y, target_w, target_h, angle=0):
         cropped[sy:sy+vh, sx:sx+vw] = rotated[iy1:iy2, ix1:ix2]
     return cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
 
-def to_superpoint_tensor(gray_img, device):
-    t = torch.from_numpy(gray_img).float() / 255.0
-    return t.unsqueeze(0).unsqueeze(0).to(device)
 
-def draw_superglue_matches(img0, img1, kpts0, kpts1, matches0, conf, conf_thresh=0.2):
-    img0_vis = cv2.cvtColor(img0, cv2.COLOR_GRAY2BGR) if img0.ndim == 2 else img0.copy()
-    img1_vis = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR) if img1.ndim == 2 else img1.copy()
-    h = max(img0_vis.shape[0], img1_vis.shape[0])
-    w0 = img0_vis.shape[1]
-    vis = np.zeros((h, img0_vis.shape[1] + img1_vis.shape[1], 3), dtype=np.uint8)
-    vis[:img0_vis.shape[0], :img0_vis.shape[1]] = img0_vis
-    vis[:img1_vis.shape[0], img0_vis.shape[1]:]  = img1_vis
-    for i, j in enumerate(matches0):
-        if j < 0 or conf[i] < conf_thresh:
-            continue
-        pt0 = tuple(map(int, kpts0[i]))
-        pt1 = (int(kpts1[j][0]) + w0, int(kpts1[j][1]))
-        cv2.circle(vis, pt0, 3, (0, 255, 0), -1)
-        cv2.circle(vis, pt1,  3, (0, 255, 0), -1)
-        cv2.line(vis, pt0, pt1, (0, 255, 0), 1)
-    return vis
-
-class SuperGlueSlamNode(threading.Thread):
+class VoNode(threading.Thread):
     def __init__(
         self,
+        matcher: BaseMatcher,
         frame_queue: queue.Queue,
         pose_state: dict,
         pose_lock: threading.Lock,
@@ -102,7 +61,8 @@ class SuperGlueSlamNode(threading.Thread):
         start_x: float = 640.0,
         start_y: float = 360.0
     ):
-        super().__init__(daemon=True, name="SLAM")
+        super().__init__(daemon=True, name="VO")
+        self.matcher = matcher
         self.frame_queue = frame_queue
         self.pose_state = pose_state
         self.pose_lock = pose_lock
@@ -112,9 +72,7 @@ class SuperGlueSlamNode(threading.Thread):
         self.start_y = start_y
 
     def run(self) -> None:
-        print("[slam] Loading SuperGlue model...")
-        matching = Matching(config).eval().to(device)
-        print(f"[slam] Model ready on {device}")
+        print("[VO] Starting Visual Odometry thread...")
 
         locked_theta = 0.0
         locked_x     = self.start_x
@@ -124,10 +82,32 @@ class SuperGlueSlamNode(threading.Thread):
         past_frame_color = None
 
         while self.stop_event is None or not self.stop_event.is_set():
+            switch_matcher = None
             with self.pose_lock:
-                do_reset = self.pose_state.get("reset_slam", False)
+                do_reset = self.pose_state.get("reset_vo", False)
                 if do_reset:
-                    self.pose_state["reset_slam"] = False
+                    self.pose_state["reset_vo"] = False
+                    
+                switch_matcher = self.pose_state.get("switch_matcher", None)
+                if switch_matcher is not None:
+                    self.pose_state["switch_matcher"] = None
+
+            if switch_matcher is not None:
+                print(f"[VO] Hot-swapping Matcher Strategy to: {switch_matcher}...")
+                try:
+                    if switch_matcher == "SuperGlue":
+                        from fbl.vo.matchers.superglue import SuperGlueMatcher
+                        self.matcher = SuperGlueMatcher()
+                    elif switch_matcher == "LightGlue":
+                        from fbl.vo.matchers.lightglue import LightGlueMatcher
+                        self.matcher = LightGlueMatcher()
+                    elif switch_matcher == "MatchAnything":
+                        from fbl.vo.matchers.matchanything import MatchAnythingMatcher
+                        self.matcher = MatchAnythingMatcher()
+                    print(f"[VO] Matcher swapped! Resuming tracking from ({locked_x:.1f}, {locked_y:.1f}) seamlessly.")
+                except Exception as e:
+                    print(f"[VO] Failed to load {switch_matcher} Matcher: {e}")
+                    print("[VO] Rolling back to previous matcher to prevent crash!")
 
             if do_reset:
                 locked_x = self.start_x
@@ -158,24 +138,8 @@ class SuperGlueSlamNode(threading.Thread):
                 past_frame_color = frame_color.copy()
                 continue
 
-            # 1) ROTATION ESTIMATION
-            with torch.no_grad():
-                pred = matching({
-                    "image0": to_superpoint_tensor(past_frame_gray, device),
-                    "image1": to_superpoint_tensor(frame_gray, device),
-                })
-                pred = {k: v[0].cpu().numpy() for k, v in pred.items()}
-
-            matches = pred["matches0"]
-            kpts0   = pred["keypoints0"]
-            kpts1   = pred["keypoints1"]
-            conf    = pred["matching_scores0"]
-
-            pts0, pts1 = [], []
-            for i, m in enumerate(matches):
-                if m >= 0 and conf[i] > 0.5:
-                    pts0.append(kpts0[i])
-                    pts1.append(kpts1[m])
+            # 1) ROTATION ESTIMATION (Visual Odometry)
+            pts0, pts1, rot_vis = self.matcher.match(past_frame_gray, frame_gray)
 
             rot_deg = 0.0
             if len(pts0) >= 8:
@@ -198,36 +162,18 @@ class SuperGlueSlamNode(threading.Thread):
                     locked_theta -= rot_deg
                     locked_theta  = normalize_deg(locked_theta)
 
-            if self.match_queue is not None:
-                rot_vis = draw_superglue_matches(
-                    past_frame_gray, frame_gray, kpts0, kpts1, matches, conf, conf_thresh=0.5)
+            if self.match_queue is not None and rot_vis is not None:
                 try:
                     self.match_queue.put_nowait(("rot", rot_vis))
                 except queue.Full:
                     pass
 
-            # 2) TRANSLATION
+            # 2) TRANSLATION ESTIMATION (Visual Odometry)
             cx_i, cy_i = w // 2, h // 2
             curr_aligned = preprocess_image(frame_color, cx_i, cy_i, w, h, angle=-rot_deg)
             prev_aligned = past_frame_gray
 
-            with torch.no_grad():
-                pred_t = matching({
-                    "image0": to_superpoint_tensor(prev_aligned, device),
-                    "image1": to_superpoint_tensor(curr_aligned, device),
-                })
-                pred_t = {k: v[0].cpu().numpy() for k, v in pred_t.items()}
-
-            matches_t = pred_t["matches0"]
-            kpts0_t   = pred_t["keypoints0"]
-            kpts1_t   = pred_t["keypoints1"]
-            conf_t    = pred_t["matching_scores0"]
-
-            pts0_t, pts1_t = [], []
-            for i, m in enumerate(matches_t):
-                if m >= 0 and conf_t[i] > 0.8:
-                    pts0_t.append(kpts0_t[i])
-                    pts1_t.append(kpts1_t[m])
+            pts0_t, pts1_t, trans_vis = self.matcher.match(prev_aligned, curr_aligned)
 
             if len(pts0_t) >= 8:
                 pts0_t = np.float32(pts0_t)
@@ -239,10 +185,7 @@ class SuperGlueSlamNode(threading.Thread):
                 locked_x -= math.cos(th) * dx_img - math.sin(th) * dy_img
                 locked_y -= math.sin(th) * dx_img + math.cos(th) * dy_img
 
-            if self.match_queue is not None:
-                trans_vis = draw_superglue_matches(
-                    prev_aligned, curr_aligned,
-                    kpts0_t, kpts1_t, matches_t, conf_t, conf_thresh=0.8)
+            if self.match_queue is not None and trans_vis is not None:
                 try:
                     self.match_queue.put_nowait(("trans", trans_vis))
                 except queue.Full:
@@ -251,7 +194,7 @@ class SuperGlueSlamNode(threading.Thread):
             past_frame_gray  = frame_gray.copy()
             past_frame_color = frame_color.copy()
 
-            print(f"[slam] θ={locked_theta:.2f}°  x={locked_x:.2f}  y={locked_y:.2f}")
+            print(f"[VO] θ={locked_theta:.2f}°  x={locked_x:.2f}  y={locked_y:.2f}")
 
             with self.pose_lock:
                 self.pose_state["x"]     = locked_x

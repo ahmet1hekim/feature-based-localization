@@ -3,7 +3,8 @@ import threading
 import dearpygui.dearpygui as dpg
 
 from fbl.core.engine import SimEngine
-from fbl.slam.tracker import SuperGlueSlamNode
+from fbl.vo.tracker import VoNode
+from fbl.vo.matchers import SuperGlueMatcher
 from fbl.navigation.planner_node import NavigationNode
 from fbl.ui.app import Application
 
@@ -21,14 +22,15 @@ def main():
     app = Application(engine, pose_state, pose_lock, match_queue)
     app.setup()
 
-    slam_t = SuperGlueSlamNode(
+    vo_t = VoNode(
+        matcher=SuperGlueMatcher(),
         frame_queue=frame_queue,
         pose_state=pose_state,
         pose_lock=pose_lock,
         match_queue=match_queue,
         stop_event=stop_event,
         start_x=init_x,
-        start_y=init_y
+        start_y=init_y,
     )
     
     plan_t = NavigationNode(
@@ -41,7 +43,7 @@ def main():
         stop_event=stop_event
     )
 
-    slam_t.start()
+    vo_t.start()
     plan_t.start()
     print("[main] Threads started.")
 
@@ -52,7 +54,7 @@ def main():
         print("\n[main] Ctrl-C.")
     finally:
         stop_event.set()
-        slam_t.join(timeout=3)
+        vo_t.join(timeout=3)
         plan_t.join(timeout=3)
         app.teardown()
         print("[main] Done.")
