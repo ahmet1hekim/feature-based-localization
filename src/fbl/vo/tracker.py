@@ -14,41 +14,6 @@ def normalize_deg(a: float) -> float:
 def angle_error_deg(pred: float, real: float) -> float:
     return (pred - real + 180.0) % 360.0 - 180.0
 
-def preprocess_image(img, center_x, center_y, target_w, target_h, angle=0):
-    h, w = img.shape[:2]
-
-    if angle != 0:
-        rot_mat = cv2.getRotationMatrix2D((center_x, center_y), -angle, 1.0)
-        cos = abs(rot_mat[0, 0])
-        sin = abs(rot_mat[0, 1])
-        new_w = int(h * sin + w * cos)
-        new_h = int(h * cos + w * sin)
-        rot_mat[0, 2] += (new_w / 2) - center_x
-        rot_mat[1, 2] += (new_h / 2) - center_y
-        rotated = cv2.warpAffine(
-            img, rot_mat, (new_w, new_h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
-        center_x = new_w // 2
-        center_y = new_h // 2
-        h, w = rotated.shape[:2]
-    else:
-        rotated = img
-
-    half_w, half_h = target_w // 2, target_h // 2
-    x1, y1, x2, y2 = center_x - half_w, center_y - half_h, center_x + half_w, center_y + half_h
-    ix1, iy1 = max(x1, 0), max(y1, 0)
-    ix2, iy2 = min(x2, w),  min(y2, h)
-    cropped = np.zeros((target_h, target_w, 3), dtype=img.dtype)
-    sx, sy   = ix1 - x1, iy1 - y1
-    vw, vh   = ix2 - ix1, iy2 - iy1
-    if vw > 0 and vh > 0:
-        cropped[sy:sy+vh, sx:sx+vw] = rotated[iy1:iy2, ix1:ix2]
-    return cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-
-
 class VoNode(threading.Thread):
     def __init__(
         self,
@@ -79,7 +44,6 @@ class VoNode(threading.Thread):
         locked_y     = self.start_y
 
         past_frame_gray  = None
-        past_frame_color = None
 
         while self.stop_event is None or not self.stop_event.is_set():
             switch_matcher = None
@@ -114,7 +78,6 @@ class VoNode(threading.Thread):
                 locked_y = self.start_y
                 locked_theta = 0.0
                 past_frame_gray = None
-                past_frame_color = None
                 with self.pose_lock:
                     self.pose_state["x"] = self.start_x
                     self.pose_state["y"] = self.start_y
@@ -130,18 +93,19 @@ class VoNode(threading.Thread):
                 continue
 
             h, w = frame_bgr.shape[:2]
-            frame_color = frame_bgr
             frame_gray  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
 
             if past_frame_gray is None:
-                past_frame_gray  = frame_gray.copy()
-                past_frame_color = frame_color.copy()
+                past_frame_gray = frame_gray.copy()
                 continue
 
-            # 1) ROTATION ESTIMATION (Visual Odometry)
+            # 1) ROTATION ESTIMATION
             pts0, pts1, rot_vis = self.matcher.match(past_frame_gray, frame_gray)
 
             rot_deg = 0.0
+            dx_img  = 0.0
+            dy_img  = 0.0
+
             if len(pts0) >= 8:
                 pts0_a = np.float32(pts0)
                 pts1_a = np.float32(pts1)
@@ -154,7 +118,7 @@ class VoNode(threading.Thread):
                 )
                 if M is not None and inliers is not None and int(inliers.sum()) >= 6:
                     cx, cy = w * 0.5, h * 0.5
-                    M3 = np.vstack([M, [0, 0, 1]])
+                    M3    = np.vstack([M, [0, 0, 1]])
                     T_neg = np.array([[1,0,-cx],[0,1,-cy],[0,0,1]])
                     T_pos = np.array([[1,0, cx],[0,1, cy],[0,0,1]])
                     M_c   = (T_pos @ M3 @ T_neg)[:2, :]
@@ -162,37 +126,36 @@ class VoNode(threading.Thread):
                     locked_theta -= rot_deg
                     locked_theta  = normalize_deg(locked_theta)
 
+                    # 2) TRANSLATION — de-rotate RANSAC inlier matches analytically.
+                    # This is equivalent to de-rotating the entire image and re-matching,
+                    # but avoids calling the matcher a second time on a modified image.
+                    inlier_mask = inliers.ravel() == 1
+                    p0_in = pts0_a[inlier_mask]
+                    p1_in = pts1_a[inlier_mask]
+
+                    rad_r = math.radians(-rot_deg)
+                    cos_r, sin_r = math.cos(rad_r), math.sin(rad_r)
+                    p1_c = p1_in - np.array([cx, cy], dtype=np.float32)
+                    p1_derot = np.column_stack([
+                        cos_r * p1_c[:, 0] - sin_r * p1_c[:, 1] + cx,
+                        sin_r * p1_c[:, 0] + cos_r * p1_c[:, 1] + cy,
+                    ])
+                    disp   = p1_derot - p0_in
+                    dx_img = float(np.median(disp[:, 0]))
+                    dy_img = float(np.median(disp[:, 1]))
+
+            th = math.radians(locked_theta)
+            locked_x -= math.cos(th) * dx_img - math.sin(th) * dy_img
+            locked_y -= math.sin(th) * dx_img + math.cos(th) * dy_img
+
             if self.match_queue is not None and rot_vis is not None:
                 try:
                     self.match_queue.put_nowait(("rot", rot_vis))
                 except queue.Full:
                     pass
 
-            # 2) TRANSLATION ESTIMATION (Visual Odometry)
-            cx_i, cy_i = w // 2, h // 2
-            curr_aligned = preprocess_image(frame_color, cx_i, cy_i, w, h, angle=-rot_deg)
-            prev_aligned = past_frame_gray
 
-            pts0_t, pts1_t, trans_vis = self.matcher.match(prev_aligned, curr_aligned)
-
-            if len(pts0_t) >= 8:
-                pts0_t = np.float32(pts0_t)
-                pts1_t = np.float32(pts1_t)
-                v       = pts1_t - pts0_t
-                dx_img  = np.median(v[:, 0])
-                dy_img  = np.median(v[:, 1])
-                th      = math.radians(locked_theta)
-                locked_x -= math.cos(th) * dx_img - math.sin(th) * dy_img
-                locked_y -= math.sin(th) * dx_img + math.cos(th) * dy_img
-
-            if self.match_queue is not None and trans_vis is not None:
-                try:
-                    self.match_queue.put_nowait(("trans", trans_vis))
-                except queue.Full:
-                    pass
-
-            past_frame_gray  = frame_gray.copy()
-            past_frame_color = frame_color.copy()
+            past_frame_gray = frame_gray.copy()
 
             print(f"[VO] θ={locked_theta:.2f}°  x={locked_x:.2f}  y={locked_y:.2f}")
 

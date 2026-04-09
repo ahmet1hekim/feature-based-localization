@@ -77,11 +77,11 @@ class Application:
 
                 with dpg.child_window(width=RIGHT_W, height=APP_H, no_scrollbar=True, border=False):
                     with dpg.child_window(height=CAM_H, no_scrollbar=True, border=False):
-                        dpg.add_text("▶  Drone Camera", color=(160, 180, 255, 255))
+                        dpg.add_text("  Drone Camera", color=(160, 180, 255, 255))
                         dpg.add_image("cam_tex", width=RIGHT_W, height=CAM_IMG_H)
                     dpg.add_separator()
                     with dpg.child_window(height=MATCH_H, no_scrollbar=True, border=False):
-                        dpg.add_text("▶  Visual Odometry Matches", color=(160, 255, 180, 255))
+                        dpg.add_text("  Visual Odometry Matches", color=(160, 255, 180, 255))
                         dpg.add_image("match_tex", width=RIGHT_W, height=MATCH_IMG_H)
                     dpg.add_separator()
                     with dpg.child_window(height=INFO_H, no_scrollbar=True, border=False):
@@ -110,9 +110,9 @@ class Application:
                                     self.pose_state["reset_planner"] = True
                                 upload_resized("match_tex", np.zeros((MATCH_IMG_H, RIGHT_W, 3), dtype=np.uint8), RIGHT_W, MATCH_IMG_H)
                             
-                            dpg.add_button(label=" ▶ Start ", callback=on_start)
-                            dpg.add_button(label=" ⏸ Stop ", callback=on_stop)
-                            dpg.add_button(label=" ↺ Reset ", callback=on_reset)
+                            dpg.add_button(label="  Start ", callback=on_start)
+                            dpg.add_button(label="  Stop ", callback=on_stop)
+                            dpg.add_button(label="  Reset ", callback=on_reset)
                             
                         dpg.add_text(tag="txt_runtime_status", default_value="Status: STOPPED", color=(255, 100, 100, 255))
                         dpg.add_separator()
@@ -154,8 +154,8 @@ class Application:
 
                             def on_wp_clear(): self.engine.clear_waypoints()
 
-                            dpg.add_button(label="↑", callback=on_wp_up)
-                            dpg.add_button(label="↓", callback=on_wp_down)
+                            dpg.add_button(label="Move Up", callback=on_wp_up)
+                            dpg.add_button(label="Move Down", callback=on_wp_down)
                             dpg.add_button(label="Del", callback=on_wp_del)
                             dpg.add_button(label="Clear", callback=on_wp_clear)
                             
@@ -169,7 +169,7 @@ class Application:
                         dpg.add_text("Drone", color=(160, 160, 160, 200))
                         dpg.add_text("x=---  y=---  θ=---", tag="txt_pos")
                         dpg.add_text("SLAM", color=(160, 160, 160, 200))
-                        dpg.add_text("x=---  y=---",        tag="txt_slam")
+                        dpg.add_text("x=---  y=---  θ=---", tag="txt_slam")
                         dpg.add_text("Local Goal", color=(160, 160, 160, 200))
                         dpg.add_text("x=---  y=---",        tag="txt_goal")
 
@@ -264,7 +264,7 @@ class Application:
 
         cmd = state.cmd
         dpg.set_value("txt_pos", f"x={state.pos_x:.0f}  y={state.pos_y:.0f}  θ={state.angle:.1f}°")
-        dpg.set_value("txt_slam", f"x={cmd.est_x:.0f}  y={cmd.est_y:.0f}" if (cmd.est_x > 0 or cmd.est_y > 0) else "x=---  y=---")
+        dpg.set_value("txt_slam", f"x={cmd.est_x:.0f}  y={cmd.est_y:.0f}  θ={cmd.est_angle:.1f}°" if (cmd.est_x > 0 or cmd.est_y > 0) else "x=---  y=---  θ=---°")
         dpg.set_value("txt_goal", f"x={cmd.goal_x:.0f}  y={cmd.goal_y:.0f}")
 
         status_str = "Status: RUNNING" if state.is_running else "Status: STOPPED"

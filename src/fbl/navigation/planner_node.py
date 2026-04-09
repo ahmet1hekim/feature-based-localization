@@ -144,6 +144,7 @@ class NavigationNode(threading.Thread):
                 turn_angle = turn,
                 est_x      = smooth_x,
                 est_y      = smooth_y,
+                est_angle  =  smooth_theta,
                 goal_x     = la_x,
                 goal_y     = la_y,
                 path_x     = [p[0] for p in path_arc],

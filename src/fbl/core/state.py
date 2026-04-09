@@ -6,6 +6,7 @@ class AutopilotCmd:
     turn_angle: float = 0.0
     est_x:      float = -1.0
     est_y:      float = -1.0
+    est_angle:  float = -1.0
     # Next local sub-goal
     goal_x:     float = 300.0
     goal_y:     float = 700.0
