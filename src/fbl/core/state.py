@@ -8,8 +8,8 @@ class AutopilotCmd:
     est_y:      float = -1.0
     est_angle:  float = -1.0
     # Next local sub-goal
-    goal_x:     float = 300.0
-    goal_y:     float = 700.0
+    goal_x:     float = 0.0
+    goal_y:     float = 0.0
     # Short local path arc prediction (from path planner)
     path_x:     list  = field(default_factory=lambda: [0.0] * 50) # N_PATH=50
     path_y:     list  = field(default_factory=lambda: [0.0] * 50)

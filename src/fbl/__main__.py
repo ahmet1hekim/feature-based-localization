@@ -11,7 +11,7 @@ from fbl.ui.app import Application
 def main():
     frame_queue = queue.Queue(maxsize=1)
     match_queue = queue.Queue(maxsize=4)
-    pose_state: dict = {"x": None, "y": None, "theta": None}
+    pose_state: dict = {}
     pose_lock = threading.Lock()
     stop_event = threading.Event()
 

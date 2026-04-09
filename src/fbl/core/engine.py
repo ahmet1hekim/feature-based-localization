@@ -1,7 +1,5 @@
 """
-sim_engine.py -> engine.py
---------------------------
-Drone physics + frame generation. No rendering to screen directly here.
+Drone physics + camera frame generation. No rendering to screen directly here.
 """
 
 import math

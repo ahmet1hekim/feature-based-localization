@@ -3,21 +3,28 @@ import cv2
 import numpy as np
 from fbl.core.state import DroneState
 
+# Default map panel dimensions (used when no dynamic size is provided).
 MAP_W = 1050
-MAP_H = 900 # Inherited from APP_H
+MAP_H = 900  # Matches default APP_H
+
 
 class MapView:
-    def __init__(self, bg_w: int, bg_h: int):
+    def __init__(self, bg_w: int, bg_h: int, map_w: int = MAP_W, map_h: int = MAP_H):
         self.bg_w, self.bg_h = bg_w, bg_h
-        self.zoom   = max(MAP_W / bg_w, MAP_H / bg_h)
-        
-        # Center the view initially
+        self.map_w = map_w
+        self.map_h = map_h
+        self.zoom = max(map_w / bg_w, map_h / bg_h)
+
+        # Centre the view initially
         self.offset = np.array([
-            self.bg_w / 2.0 - (MAP_W / self.zoom) / 2.0,
-            self.bg_h / 2.0 - (MAP_H / self.zoom) / 2.0
+            self.bg_w / 2.0 - (map_w / self.zoom) / 2.0,
+            self.bg_h / 2.0 - (map_h / self.zoom) / 2.0,
         ])
         self.clamp()
 
+    # ------------------------------------------------------------------
+    # Coordinate helpers
+    # ------------------------------------------------------------------
     def w2s(self, wx, wy):
         return ((wx - self.offset[0]) * self.zoom,
                 (wy - self.offset[1]) * self.zoom)
@@ -27,63 +34,86 @@ class MapView:
                 sy / self.zoom + self.offset[1])
 
     def clamp(self):
-        max_ox = max(0.0, self.bg_w - MAP_W / self.zoom)
-        max_oy = max(0.0, self.bg_h - MAP_H / self.zoom)
+        max_ox = max(0.0, self.bg_w - self.map_w / self.zoom)
+        max_oy = max(0.0, self.bg_h - self.map_h / self.zoom)
         self.offset[0] = max(0.0, min(self.offset[0], max_ox))
         self.offset[1] = max(0.0, min(self.offset[1], max_oy))
 
     def zoom_at(self, sx, sy, factor):
         wx, wy = self.s2w(sx, sy)
-        zoom_min = max(MAP_W / self.bg_w, MAP_H / self.bg_h)
+        zoom_min = max(self.map_w / self.bg_w, self.map_h / self.bg_h)
         self.zoom = max(zoom_min, min(self.zoom * factor, 8.0))
         self.offset[0] = wx - sx / self.zoom
         self.offset[1] = wy - sy / self.zoom
         self.clamp()
 
+    def resize(self, map_w: int, map_h: int) -> None:
+        """Update panel dimensions (called when the window is resized)."""
+        self.map_w = map_w
+        self.map_h = map_h
+        zoom_min = max(map_w / self.bg_w, map_h / self.bg_h)
+        self.zoom = max(zoom_min, self.zoom)
+        self.clamp()
+
+
+# ------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------
 def _dashed_line(img, p0, p1, color, dash=14, gap=8, thickness=1):
-    dx, dy = p1[0]-p0[0], p1[1]-p0[1]
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
     dist = math.hypot(dx, dy)
     if dist < 1:
         return
-    ux, uy = dx/dist, dy/dist
+    ux, uy = dx / dist, dy / dist
     pos, drawing = 0.0, True
     while pos < dist:
         seg = dash if drawing else gap
         if drawing:
-            end = min(pos+seg, dist)
-            a = (int(p0[0]+ux*pos), int(p0[1]+uy*pos))
-            b = (int(p0[0]+ux*end), int(p0[1]+uy*end))
+            end = min(pos + seg, dist)
+            a = (int(p0[0] + ux * pos), int(p0[1] + uy * pos))
+            b = (int(p0[0] + ux * end), int(p0[1] + uy * end))
             cv2.line(img, a, b, color, thickness, cv2.LINE_AA)
         pos += seg
         drawing = not drawing
 
-def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
-                     show_slam: bool, show_arc: bool, show_dash: bool) -> np.ndarray:
+
+# ------------------------------------------------------------------
+# Frame renderer
+# ------------------------------------------------------------------
+def render_map_frame(
+    bg: np.ndarray,
+    mv: MapView,
+    state: DroneState,
+    show_slam: bool,
+    show_arc: bool,
+    show_dash: bool,
+) -> np.ndarray:
     bg_h, bg_w = bg.shape[:2]
     ox, oy = mv.offset
-    zoom   = mv.zoom
+    zoom = mv.zoom
+    map_w, map_h = mv.map_w, mv.map_h
 
     ix0 = int(max(0, ox))
     iy0 = int(max(0, oy))
-    ix1 = int(min(bg_w, ox + MAP_W / zoom)) + 1
-    iy1 = int(min(bg_h, oy + MAP_H / zoom)) + 1
+    ix1 = int(min(bg_w, ox + map_w / zoom)) + 1
+    iy1 = int(min(bg_h, oy + map_h / zoom)) + 1
     ix1 = min(ix1, bg_w)
     iy1 = min(iy1, bg_h)
 
-    canvas = np.zeros((MAP_H, MAP_W, 3), dtype=np.uint8)
+    canvas = np.zeros((map_h, map_w, 3), dtype=np.uint8)
 
     if ix1 > ix0 and iy1 > iy0:
-        crop    = bg[iy0:iy1, ix0:ix1]
-        scr_w   = max(1, int(round((ix1 - ix0) * zoom)))
-        scr_h   = max(1, int(round((iy1 - iy0) * zoom)))
+        crop = bg[iy0:iy1, ix0:ix1]
+        scr_w = max(1, int(round((ix1 - ix0) * zoom)))
+        scr_h = max(1, int(round((iy1 - iy0) * zoom)))
         resized = cv2.resize(crop, (scr_w, scr_h), interpolation=cv2.INTER_LINEAR)
 
         scr_x0 = int(round((ix0 - ox) * zoom))
         scr_y0 = int(round((iy0 - oy) * zoom))
 
         dst_x0 = max(0, scr_x0);  dst_y0 = max(0, scr_y0)
-        dst_x1 = min(MAP_W, scr_x0 + scr_w)
-        dst_y1 = min(MAP_H, scr_y0 + scr_h)
+        dst_x1 = min(map_w, scr_x0 + scr_w)
+        dst_y1 = min(map_h, scr_y0 + scr_h)
         src_x0 = dst_x0 - scr_x0;  src_y0 = dst_y0 - scr_y0
         src_x1 = src_x0 + (dst_x1 - dst_x0)
         src_y1 = src_y0 + (dst_y1 - dst_y0)
@@ -94,6 +124,7 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
 
     def s(wx, wy):
         return (int((wx - ox) * zoom), int((wy - oy) * zoom))
+
     def dot_r():
         return max(2, int(2.5 * zoom))
 
@@ -102,9 +133,9 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
     if cmd.global_path_x and len(cmd.global_path_x) > 1:
         global_col = (180, 100, 255)
         for i in range(1, len(cmd.global_path_x)):
-            cv2.line(canvas, 
-                     s(cmd.global_path_x[i-1], cmd.global_path_y[i-1]), 
-                     s(cmd.global_path_x[i],   cmd.global_path_y[i]), 
+            cv2.line(canvas,
+                     s(cmd.global_path_x[i - 1], cmd.global_path_y[i - 1]),
+                     s(cmd.global_path_x[i],     cmd.global_path_y[i]),
                      global_col, 2, cv2.LINE_AA)
 
     wp_r = max(4, int(8 * zoom))
@@ -118,7 +149,7 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
     if show_arc and cmd.path_len > 1:
         arc_col = (50, 220, 80)
         for i in range(1, cmd.path_len):
-            cv2.line(canvas, s(cmd.path_x[i-1], cmd.path_y[i-1]),
+            cv2.line(canvas, s(cmd.path_x[i - 1], cmd.path_y[i - 1]),
                      s(cmd.path_x[i],   cmd.path_y[i]),
                      arc_col, 1, cv2.LINE_AA)
         for i in range(0, cmd.path_len, 5):
@@ -149,9 +180,11 @@ def render_map_frame(bg: np.ndarray, mv: MapView, state: DroneState,
     rad = math.radians(state.angle)
     ca, sa_ = math.cos(rad), math.sin(rad)
     dx, dy = s(state.pos_x, state.pos_y)
-    corners_local = [(-rw/2, -rh/2), (rw/2, -rh/2), (rw/2, rh/2), (-rw/2, rh/2)]
+    corners_local = [(-rw / 2, -rh / 2), (rw / 2, -rh / 2),
+                     (rw / 2,  rh / 2), (-rw / 2,  rh / 2)]
     corners = np.array(
-        [(int(ca*lx - sa_*ly + dx), int(sa_*lx + ca*ly + dy)) for lx, ly in corners_local],
+        [(int(ca * lx - sa_ * ly + dx), int(sa_ * lx + ca * ly + dy))
+         for lx, ly in corners_local],
         dtype=np.int32)
     cv2.fillPoly(canvas,  [corners], (30, 30, 220))
     cv2.polylines(canvas, [corners], True, (255, 255, 255), 1, cv2.LINE_AA)

@@ -11,9 +11,6 @@ from .matchers.base import BaseMatcher
 def normalize_deg(a: float) -> float:
     return (a + 360.0) % 360.0
 
-def angle_error_deg(pred: float, real: float) -> float:
-    return (pred - real + 180.0) % 360.0 - 180.0
-
 class VoNode(threading.Thread):
     def __init__(
         self,
@@ -72,6 +69,9 @@ class VoNode(threading.Thread):
                 except Exception as e:
                     print(f"[VO] Failed to load {switch_matcher} Matcher: {e}")
                     print("[VO] Rolling back to previous matcher to prevent crash!")
+                finally:
+                    with self.pose_lock:
+                        self.pose_state["matcher_loading"] = False
 
             if do_reset:
                 locked_x = self.start_x
