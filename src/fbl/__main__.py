@@ -15,7 +15,7 @@ def main():
     pose_lock = threading.Lock()
     stop_event = threading.Event()
 
-    engine = SimEngine("dag.jpg", frame_queue)
+    engine = SimEngine("colsehir.jpg", frame_queue)
     init_x = engine.bg_w / 2.0
     init_y = engine.bg_h / 2.0
 
