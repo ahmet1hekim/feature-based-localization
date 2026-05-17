@@ -1,6 +1,8 @@
 import math
 import queue
 import threading
+import time
+from collections import deque
 from typing import Optional
 
 import cv2
@@ -41,6 +43,7 @@ class VoNode(threading.Thread):
         locked_y     = self.start_y
 
         past_frame_gray  = None
+        _frame_ts: deque = deque(maxlen=60)  # rolling window for FPS
 
         while self.stop_event is None or not self.stop_event.is_set():
             switch_matcher = None
@@ -66,6 +69,8 @@ class VoNode(threading.Thread):
                         from fbl.vo.matchers.matchanything import MatchAnythingMatcher
                         self.matcher = MatchAnythingMatcher()
                     print(f"[VO] Matcher swapped! Resuming tracking from ({locked_x:.1f}, {locked_y:.1f}) seamlessly.")
+                    with self.pose_lock:
+                        self.pose_state["current_matcher"] = switch_matcher
                 except Exception as e:
                     print(f"[VO] Failed to load {switch_matcher} Matcher: {e}")
                     print("[VO] Rolling back to previous matcher to prevent crash!")
@@ -159,7 +164,14 @@ class VoNode(threading.Thread):
 
             print(f"[VO] θ={locked_theta:.2f}°  x={locked_x:.2f}  y={locked_y:.2f}")
 
+            _frame_ts.append(time.perf_counter())
+            if len(_frame_ts) >= 2:
+                vo_fps = (len(_frame_ts) - 1) / (_frame_ts[-1] - _frame_ts[0])
+            else:
+                vo_fps = 0.0
+
             with self.pose_lock:
-                self.pose_state["x"]     = locked_x
-                self.pose_state["y"]     = locked_y
-                self.pose_state["theta"] = locked_theta
+                self.pose_state["x"]      = locked_x
+                self.pose_state["y"]      = locked_y
+                self.pose_state["theta"]  = locked_theta
+                self.pose_state["vo_fps"] = vo_fps

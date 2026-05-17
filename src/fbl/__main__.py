@@ -19,6 +19,8 @@ def main():
     init_x = engine.bg_w / 2.0
     init_y = engine.bg_h / 2.0
 
+    pose_state["current_matcher"] = "SuperGlue"
+
     app = Application(engine, pose_state, pose_lock, match_queue)
     app.setup()
 

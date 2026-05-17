@@ -1,10 +1,12 @@
+import os
 import queue
 import cv2
 import numpy as np
 import dearpygui.dearpygui as dpg
 
 from fbl.ui.map_view import MapView, render_map_frame
-from fbl.core.engine import SimEngine
+from fbl.ui.benchmark_runner import BenchmarkRunner
+from fbl.core.engine import SimEngine, ASSETS_DIR
 from fbl.core.state import DroneState
 
 # --------------------------------------------------------------------------
@@ -52,6 +54,11 @@ class Application:
         self._compute_layout()
 
         self.mv = MapView(engine.bg_w, engine.bg_h, self._map_w, self._map_h)
+
+        self.bench_event_queue: queue.Queue = queue.Queue(maxsize=32)
+        self.bench_runner = BenchmarkRunner(
+            engine, pose_state, pose_lock, self.bench_event_queue
+        )
 
     # ------------------------------------------------------------------
     # Layout helpers
@@ -184,110 +191,174 @@ class Application:
                     # Info / controls — height=-1 fills remaining space
                     with dpg.child_window(tag="info_panel",
                                           height=-1,
-                                          no_scrollbar=True, border=False):
-                        dpg.add_text("Controls & Info", color=(255, 220, 120, 255))
-                        dpg.add_separator()
+                                          no_scrollbar=False, border=False):
+                        with dpg.tab_bar():
 
-                        def on_matcher_change(s, data):
-                            with self.pose_lock:
-                                self.pose_state["switch_matcher"] = data
-                                self.pose_state["matcher_loading"] = True
+                            # ── Simulation tab ────────────────────────────
+                            with dpg.tab(label="Simulation"):
+                                dpg.add_text("Controls & Info", color=(255, 220, 120, 255))
+                                dpg.add_separator()
 
-                        dpg.add_combo(
-                            items=["SuperGlue", "LightGlue", "MatchAnything"],
-                            default_value="SuperGlue",
-                            callback=on_matcher_change,
-                            width=-1,
-                            tag="combo_matcher",
-                        )
-                        dpg.add_separator()
+                                def on_matcher_change(s, data):
+                                    with self.pose_lock:
+                                        self.pose_state["switch_matcher"] = data
+                                        self.pose_state["matcher_loading"] = True
 
-                        with dpg.group(horizontal=True):
-                            def on_start(): self.engine.is_running = True
-                            def on_stop():  self.engine.is_running = False
-                            def on_reset():
-                                self.engine.reset_state()
-                                with self.pose_lock:
-                                    self.pose_state["reset_vo"]      = True
-                                    self.pose_state["reset_planner"] = True
-                                upload_resized(
-                                    "match_tex",
-                                    np.zeros((self._match_img_h, self._right_w, 3), dtype=np.uint8),
-                                    self._right_w, self._match_img_h,
+                                dpg.add_combo(
+                                    items=["SuperGlue", "LightGlue", "MatchAnything"],
+                                    default_value="SuperGlue",
+                                    callback=on_matcher_change,
+                                    width=-1,
+                                    tag="combo_matcher",
                                 )
+                                dpg.add_separator()
 
-                            dpg.add_button(label="  Start ", callback=on_start)
-                            dpg.add_button(label="  Stop ",  callback=on_stop)
-                            dpg.add_button(label="  Reset ", callback=on_reset)
+                                with dpg.group(horizontal=True):
+                                    def on_start(): self.engine.is_running = True
+                                    def on_stop():  self.engine.is_running = False
+                                    def on_reset():
+                                        self.engine.reset_state()
+                                        with self.pose_lock:
+                                            self.pose_state["reset_vo"]      = True
+                                            self.pose_state["reset_planner"] = True
+                                        upload_resized(
+                                            "match_tex",
+                                            np.zeros((self._match_img_h, self._right_w, 3), dtype=np.uint8),
+                                            self._right_w, self._match_img_h,
+                                        )
 
-                        dpg.add_text(tag="txt_runtime_status",
-                                     default_value="Status: STOPPED",
-                                     color=(255, 100, 100, 255))
-                        dpg.add_separator()
+                                    dpg.add_button(label="  Start ", callback=on_start)
+                                    dpg.add_button(label="  Stop ",  callback=on_stop)
+                                    dpg.add_button(label="  Reset ", callback=on_reset)
 
-                        dpg.add_text("Waypoints (Global Path):")
-                        dpg.add_listbox(items=[], tag="list_waypoints", width=-1, num_items=5)
+                                dpg.add_text(tag="txt_runtime_status",
+                                             default_value="Status: STOPPED",
+                                             color=(255, 100, 100, 255))
+                                dpg.add_separator()
 
-                        with dpg.group(horizontal=True):
-                            def on_wp_up():
-                                idx = dpg.get_value("list_waypoints")
-                                if not idx: return
-                                wps = self.engine.waypoints
-                                try:
-                                    i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})"
-                                         for j, w in enumerate(wps)].index(idx)
-                                    if i > 0:
-                                        wps[i - 1], wps[i] = wps[i], wps[i - 1]
-                                        self.engine.reorder_waypoints(wps)
-                                except ValueError:
-                                    pass
+                                dpg.add_text("Waypoints (Global Path):")
+                                dpg.add_listbox(items=[], tag="list_waypoints", width=-1, num_items=5)
 
-                            def on_wp_down():
-                                idx = dpg.get_value("list_waypoints")
-                                if not idx: return
-                                wps = self.engine.waypoints
-                                try:
-                                    i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})"
-                                         for j, w in enumerate(wps)].index(idx)
-                                    if i < len(wps) - 1:
-                                        wps[i + 1], wps[i] = wps[i], wps[i + 1]
-                                        self.engine.reorder_waypoints(wps)
-                                except ValueError:
-                                    pass
+                                with dpg.group(horizontal=True):
+                                    def on_wp_up():
+                                        idx = dpg.get_value("list_waypoints")
+                                        if not idx: return
+                                        wps = self.engine.waypoints
+                                        try:
+                                            i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})"
+                                                 for j, w in enumerate(wps)].index(idx)
+                                            if i > 0:
+                                                wps[i - 1], wps[i] = wps[i], wps[i - 1]
+                                                self.engine.reorder_waypoints(wps)
+                                        except ValueError:
+                                            pass
 
-                            def on_wp_del():
-                                idx = dpg.get_value("list_waypoints")
-                                if not idx: return
-                                wps = self.engine.waypoints
-                                try:
-                                    i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})"
-                                         for j, w in enumerate(wps)].index(idx)
-                                    self.engine.remove_waypoint(i)
-                                except ValueError:
-                                    pass
+                                    def on_wp_down():
+                                        idx = dpg.get_value("list_waypoints")
+                                        if not idx: return
+                                        wps = self.engine.waypoints
+                                        try:
+                                            i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})"
+                                                 for j, w in enumerate(wps)].index(idx)
+                                            if i < len(wps) - 1:
+                                                wps[i + 1], wps[i] = wps[i], wps[i + 1]
+                                                self.engine.reorder_waypoints(wps)
+                                        except ValueError:
+                                            pass
 
-                            def on_wp_clear():
-                                self.engine.clear_waypoints()
+                                    def on_wp_del():
+                                        idx = dpg.get_value("list_waypoints")
+                                        if not idx: return
+                                        wps = self.engine.waypoints
+                                        try:
+                                            i = [f"WP {j}: ({w[0]:.0f}, {w[1]:.0f})"
+                                                 for j, w in enumerate(wps)].index(idx)
+                                            self.engine.remove_waypoint(i)
+                                        except ValueError:
+                                            pass
 
-                            dpg.add_button(label="Move Up",   callback=on_wp_up)
-                            dpg.add_button(label="Move Down", callback=on_wp_down)
-                            dpg.add_button(label="Del",       callback=on_wp_del)
-                            dpg.add_button(label="Clear",     callback=on_wp_clear)
+                                    def on_wp_clear():
+                                        self.engine.clear_waypoints()
 
-                        dpg.add_separator()
-                        dpg.add_checkbox(label="SLAM estimate", tag="chk_slam", default_value=True)
-                        dpg.add_checkbox(label="Path arc",      tag="chk_arc",  default_value=True)
-                        dpg.add_checkbox(label="Dashed line",   tag="chk_dash", default_value=True)
-                        dpg.add_separator()
-                        dpg.add_text("Scroll=zoom  Drag=pan  RClick=Add Waypoint",
-                                     color=(140, 140, 140, 180))
-                        dpg.add_separator()
-                        dpg.add_text("Drone",      color=(160, 160, 160, 200))
-                        dpg.add_text("x=---  y=---  θ=---", tag="txt_pos")
-                        dpg.add_text("SLAM",       color=(160, 160, 160, 200))
-                        dpg.add_text("x=---  y=---  θ=---", tag="txt_slam")
-                        dpg.add_text("Local Goal", color=(160, 160, 160, 200))
-                        dpg.add_text("x=---  y=---",        tag="txt_goal")
+                                    dpg.add_button(label="Move Up",   callback=on_wp_up)
+                                    dpg.add_button(label="Move Down", callback=on_wp_down)
+                                    dpg.add_button(label="Del",       callback=on_wp_del)
+                                    dpg.add_button(label="Clear",     callback=on_wp_clear)
+
+                                dpg.add_separator()
+                                dpg.add_checkbox(label="SLAM estimate", tag="chk_slam", default_value=True)
+                                dpg.add_checkbox(label="Path arc",      tag="chk_arc",  default_value=True)
+                                dpg.add_checkbox(label="Dashed line",   tag="chk_dash", default_value=True)
+                                dpg.add_separator()
+                                dpg.add_text("Scroll=zoom  Drag=pan  RClick=Add Waypoint",
+                                             color=(140, 140, 140, 180))
+                                dpg.add_separator()
+                                dpg.add_text("Drone",      color=(160, 160, 160, 200))
+                                dpg.add_text("x=---  y=---  θ=---", tag="txt_pos")
+                                dpg.add_text("SLAM",       color=(160, 160, 160, 200))
+                                dpg.add_text("x=---  y=---  θ=---", tag="txt_slam")
+                                dpg.add_text("Local Goal", color=(160, 160, 160, 200))
+                                dpg.add_text("x=---  y=---",        tag="txt_goal")
+
+                            # ── Benchmarks tab ────────────────────────────
+                            with dpg.tab(label="Benchmarks"):
+                                dpg.add_text("Matcher", color=(255, 220, 120, 255))
+                                dpg.add_combo(
+                                    items=["SuperGlue", "LightGlue", "MatchAnything"],
+                                    default_value="SuperGlue",
+                                    tag="bench_combo_matcher",
+                                    width=-1,
+                                )
+                                dpg.add_separator()
+                                dpg.add_text("Scenarios", color=(255, 220, 120, 255))
+
+                                def _bench_start(key):
+                                    matcher = dpg.get_value("bench_combo_matcher")
+                                    dpg.set_value("bench_results", "")
+                                    dpg.set_value("bench_saved",   "")
+                                    dpg.set_value("bench_status",  "Status: Starting…")
+                                    dpg.configure_item("bench_status",
+                                                       color=(255, 200, 50, 255))
+                                    self.bench_runner.start(key, matcher)
+
+                                def _bench_all():
+                                    matcher = dpg.get_value("bench_combo_matcher")
+                                    dpg.set_value("bench_results", "")
+                                    dpg.set_value("bench_saved",   "")
+                                    dpg.set_value("bench_status",  "Status: Starting all…")
+                                    dpg.configure_item("bench_status",
+                                                       color=(255, 200, 50, 255))
+                                    self.bench_runner.start_all(matcher)
+
+                                with dpg.group(horizontal=True):
+                                    dpg.add_button(label=" Straight ",
+                                                   callback=lambda: _bench_start("straight"))
+                                    dpg.add_button(label=" S-Curve  ",
+                                                   callback=lambda: _bench_start("curved"))
+                                    dpg.add_button(label=" Zigzag   ",
+                                                   callback=lambda: _bench_start("zigzag"))
+
+                                dpg.add_spacer(height=4)
+                                with dpg.group(horizontal=True):
+                                    dpg.add_button(label=" Run All ", callback=_bench_all)
+                                    dpg.add_button(label="  Stop   ",
+                                                   callback=lambda: self.bench_runner.stop())
+
+                                dpg.add_separator()
+                                dpg.add_text("Status: IDLE", tag="bench_status",
+                                             color=(180, 180, 180, 255))
+                                dpg.add_separator()
+                                dpg.add_text("Results:", color=(160, 160, 160, 200))
+                                dpg.add_input_text(
+                                    tag="bench_results",
+                                    multiline=True,
+                                    readonly=True,
+                                    width=-1,
+                                    height=160,
+                                    default_value="",
+                                )
+                                dpg.add_text("", tag="bench_saved",
+                                             color=(100, 220, 100, 255))
 
         # ---- Input handlers ----------------------------------------------
         with dpg.handler_registry():
@@ -362,6 +433,24 @@ class Application:
         keys  = {v: dpg.is_key_down(k) for k, v in self.key_map.items()}
         state = self.engine.tick(keys)
 
+        # --- Drain benchmark event queue ---
+        try:
+            while True:
+                kind, payload = self.bench_event_queue.get_nowait()
+                if kind == "status":
+                    dpg.set_value("bench_status", f"Status: {payload}")
+                    done_words = ("complete", "stopped", "error", "idle")
+                    done = any(w in payload.lower() for w in done_words)
+                    dpg.configure_item("bench_status",
+                                       color=(100, 220, 100, 255) if done else (255, 200, 50, 255))
+                elif kind == "results_txt":
+                    dpg.set_value("bench_results", payload)
+                elif kind == "saved":
+                    dpg.set_value("bench_saved", f"Saved: {os.path.basename(payload)}")
+        except queue.Empty:
+            pass
+
+        # --- Map update ---
         show_slam = dpg.get_value("chk_slam")
         show_arc  = dpg.get_value("chk_arc")
         show_dash = dpg.get_value("chk_dash")
